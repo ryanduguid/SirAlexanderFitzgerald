@@ -8,9 +8,15 @@ Option Explicit
 ' Import via VBE: File > Import File...
 
 ' Compares two two-column ranges (key, amount). Writes a "Recon Result"
-' sheet listing: keys only in A, keys only in B, and keys in both where
-' the amounts differ by more than tolerance. Duplicate keys within a side
-' are summed before comparing (subledger detail vs GL balance pattern).
+' sheet listing: keys only in A or only in B whose summed amount exceeds
+' tolerance, and keys in both where the amounts differ by more than
+' tolerance. Duplicate keys within a side are summed before comparing
+' (subledger detail vs GL balance pattern).
+'
+' Keys compare as trimmed text, case-insensitive. A key stored as TEXT
+' "001234" on one side and as the NUMBER 1234 on the other normalises to
+' "001234" vs "1234" — two different keys, reported as two one-sided
+' exceptions. Format both key columns the same way before running.
 '
 ' Example:
 '   CompareKeyedRanges Sheet1.Range("A2:B500"), Sheet2.Range("A2:B300"), 0.01
@@ -76,6 +82,9 @@ Public Sub CompareKeyedRanges( _
         If dictB.Exists(k) Then amtB = dictB(k)
         diff = amtA - amtB
         If Abs(diff) > tolerance Then
+            ' Text format BEFORE the write — .Value into a General cell
+            ' re-parses "001234" to 1234 and "3-10" to a date
+            ws.Cells(outRow, 1).NumberFormat = "@"
             ws.Cells(outRow, 1).Value = k
             ws.Cells(outRow, 2).Value = amtA
             If dictB.Exists(k) Then ws.Cells(outRow, 3).Value = amtB
@@ -88,6 +97,7 @@ Public Sub CompareKeyedRanges( _
         If Not dictA.Exists(k) Then
             amtB = dictB(k)
             If Abs(amtB) > tolerance Then
+                ws.Cells(outRow, 1).NumberFormat = "@"
                 ws.Cells(outRow, 1).Value = k
                 ws.Cells(outRow, 3).Value = amtB
                 ws.Cells(outRow, 4).Value = -amtB
@@ -96,7 +106,11 @@ Public Sub CompareKeyedRanges( _
         End If
     Next k
 
-    ws.Range(ws.Cells(2, 2), ws.Cells(outRow - 1, 4)).NumberFormat = "#,##0.00;(#,##0.00);""-"""
+    ' A clean recon leaves outRow = 2 — the reversed corner pair would then
+    ' normalise to the B1:D2 bounding box and format the header row.
+    If outRow > 2 Then
+        ws.Range(ws.Cells(2, 2), ws.Cells(outRow - 1, 4)).NumberFormat = "#,##0.00;(#,##0.00);""-"""
+    End If
     ws.Columns("A:D").AutoFit
 
     ws.Cells(outRow + 1, 1).Value = "Items: " & (outRow - 2) & _
@@ -107,28 +121,51 @@ End Sub
 
 ' Sums a two-column (key, amount) range into a dictionary, keyed on the
 ' trimmed text of column 1. Rows with error values (#N/A, #REF!...), blank
-' keys, or non-numeric amounts are skipped and counted, not crashed on.
+' keys, or blank/non-numeric amounts are skipped and counted, not crashed on.
 Private Function SumByKey(ByVal source As Range, ByRef skippedRows As Long) As Object
     Dim dict As Object
     Set dict = CreateObject("Scripting.Dictionary")
     dict.CompareMode = vbTextCompare
 
+    ' Shape checks — Cells(r, 2) on a one-column range would read the
+    ' worksheet column beside it, and a Ctrl-selected union silently
+    ' truncates to its first area.
+    If source.Areas.Count > 1 Then
+        Err.Raise 5, , "Pass a single contiguous range - a Ctrl-selected union would be truncated to its first area."
+    End If
+    If source.Columns.Count < 2 Then
+        Err.Raise 5, , "Range needs at least two columns (key, amount)."
+    End If
+
+    ' Bound the loop to the used range — a whole-column selection (A:B) is
+    ' 1,048,576 rows and two COM reads per row, which freezes Excel for
+    ' minutes. Rows only; column geometry stays exactly as passed.
+    Dim used As Range, lastR As Long
+    Set used = Intersect(source, source.Worksheet.UsedRange)
+    If used Is Nothing Then
+        Set SumByKey = dict
+        Exit Function
+    End If
+    lastR = used.Row + used.Rows.Count - source.Row
+
     Dim r As Long, k As String, keyVal As Variant, v As Variant
-    For r = 1 To source.Rows.Count
+    For r = 1 To lastR
         keyVal = source.Cells(r, 1).Value
         v = source.Cells(r, 2).Value
         If IsError(keyVal) Or IsError(v) Then
             skippedRows = skippedRows + 1
         Else
             k = Trim$(CStr(keyVal))
-            If Len(k) > 0 And IsNumeric(v) Then
+            ' Not IsEmpty guards the VBA trap IsNumeric(Empty) = True — a
+            ' blank amount must count as skipped, not sum as a silent zero
+            If Len(k) > 0 And Not IsEmpty(v) And IsNumeric(v) Then
                 If dict.Exists(k) Then
                     dict(k) = dict(k) + CDbl(v)
                 Else
                     dict.Add k, CDbl(v)
                 End If
             ElseIf Len(k) > 0 Or Not IsEmpty(v) Then
-                ' counts bad-amount rows AND blank-key rows carrying data;
+                ' counts blank/bad-amount rows AND blank-key rows with data;
                 ' fully empty rows (oversized selections) stay uncounted
                 skippedRows = skippedRows + 1
             End If

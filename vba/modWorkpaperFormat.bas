@@ -33,8 +33,19 @@ End Sub
 
 ' Adds a reviewer sign-off line below the last used row.
 Public Sub AddReviewerLine(ByVal ws As Worksheet)
+    ' Last used row across ALL columns — End(xlUp) on column A alone lands
+    ' inside the data when the final rows only hold amounts in B onwards
+    ' (totals blocks, formula-only footers). LookIn/LookAt are explicit
+    ' because Find otherwise inherits the user's last Find-dialog settings.
+    Dim c As Range
     Dim lastRow As Long
-    lastRow = ws.Cells(ws.Rows.Count, "A").End(xlUp).Row
+    Set c = ws.Cells.Find(What:="*", LookIn:=xlFormulas, LookAt:=xlPart, _
+        SearchOrder:=xlByRows, SearchDirection:=xlPrevious)
+    If c Is Nothing Then
+        lastRow = 0
+    Else
+        lastRow = c.Row
+    End If
 
     ws.Cells(lastRow + 2, 1).Value = "Reviewed by: ______________    Date: ____________"
     ws.Cells(lastRow + 2, 1).Font.Italic = True
@@ -53,6 +64,12 @@ End Sub
 ' top so the freeze anchors where the selection says, not where the window
 ' happened to be scrolled.
 Public Sub FreezeBelowHeader(ByVal ws As Worksheet, Optional ByVal headerRows As Long = 5)
+    ' Validate before touching the window — a failure after the existing
+    ' freeze is cleared would leave the sheet half-done, and headerRows = 0
+    ' would not fail at all (FreezePanes with A1 active freezes at the
+    ' centre of the visible window, an arbitrary split).
+    If headerRows < 1 Then Err.Raise 5, , "headerRows must be at least 1"
+
     ws.Activate
     With ActiveWindow
         .FreezePanes = False
