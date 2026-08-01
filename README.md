@@ -10,14 +10,14 @@ One `.pq` file per function. To use: Excel/Power BI → Get Data → Blank Query
 
 | Function | Category | What it does |
 |---|---|---|
-| [`Xero.TrialBalance`](powerquery/Xero.TrialBalance.pq) | Xero | Parse a Xero TB CSV: skips metadata rows, normalises YTD variant, drops Total row, splits account code as text (leading zeros survive) |
+| [`Xero.TrialBalance`](powerquery/Xero.TrialBalance.pq) | Xero | Parse a Xero TB CSV: skips metadata rows, picks the right Debit/Credit pair (plain pair = period movement, YTD pair = as-at balances; default returns as-at, `useYTD = false` for movement), drops Total row, splits account code as text — alphanumeric up to 10 chars with at least one digit, leading zeros survive |
 | [`Fx.PromoteHeaderAt`](powerquery/Fx.PromoteHeaderAt.pq) | Generic | Find-and-promote the real header row in any ledger export that buries it below title rows; errors clearly when the format changed |
 | [`Fx.AUFinancialYear`](powerquery/Fx.AUFinancialYear.pq) | AU helpers | FY label, start, end for any date (1 July – 30 June) |
 | [`Fx.ABNIsValid`](powerquery/Fx.ABNIsValid.pq) | AU helpers | ABN checksum validation (ATO weighting algorithm); checksum ≠ registered — check ABN Lookup for status |
 
-Test against [`samples/sample-xero-trial-balance.csv`](samples/sample-xero-trial-balance.csv) — a fabricated, balanced TB in Xero's export shape.
+Test against [`samples/sample-xero-trial-balance.csv`](samples/sample-xero-trial-balance.csv) — a fabricated, balanced TB in Xero's export shape, carrying both the period-movement and YTD (as-at) pairs so the pair selection gets exercised.
 
-After loading a TB, the first check is always: `List.Sum(result[Debit]) = List.Sum(result[Credit])`.
+After loading a TB, the first check is always: `Number.Abs(List.Sum(result[Debit]) - List.Sum(result[Credit])) < 0.005` — a tolerance, because the sums are IEEE doubles and exact `=` can fail on a genuinely balanced TB.
 
 ## VBA modules
 
