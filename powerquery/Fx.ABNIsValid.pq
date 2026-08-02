@@ -3,7 +3,8 @@
 // subtract 1 from the first digit, multiply the 11 digits by weights
 // (10, 1, 3, 5, 7, 9, 11, 13, 15, 17, 19), sum, and check mod 89 = 0.
 //
-// Accepts formatted input ("51 824 753 556") — non-digits are stripped.
+// Accepts formatted input ("51 824 753 556") and number-typed columns —
+// non-digits are stripped.
 // Returns false for null, for anything that isn't 11 digits after
 // stripping, and for a leading zero: no ABN starts with 0, and the
 // checksum alone can't reject one ("00000090000" sums to exactly 89).
@@ -12,9 +13,9 @@
 //
 // Usage: Fx.ABNIsValid("51 824 753 556")  // true (ATO's published example)
 let
-    ABNIsValid = (abn as nullable text) as logical =>
+    ABNIsValid = (abn as any) as logical =>
         let
-            digitsOnly = Text.Select(abn ?? "", {"0".."9"}),
+            digitsOnly = Text.Select(Text.From(abn ?? ""), {"0".."9"}),
             result =
                 if Text.Length(digitsOnly) <> 11 or Text.StartsWith(digitsOnly, "0") then
                     false
