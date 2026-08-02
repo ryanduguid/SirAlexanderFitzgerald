@@ -26,7 +26,7 @@ let
                     error Error.Record(
                         "Fx.PromoteHeaderAt",
                         "Header row not found",
-                        "No row starts with """ & FirstHeaderValue & """ — wrong report, or the export format changed."
+                        "No row has """ & FirstHeaderValue & """ as its first cell — wrong report, or the export format changed."
                     )
                 else
                     List.Min(Matches),

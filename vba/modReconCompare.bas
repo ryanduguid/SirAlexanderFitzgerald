@@ -157,8 +157,10 @@ Private Function SumByKey(ByVal source As Range, ByRef skippedRows As Long) As O
         Else
             k = Trim$(CStr(keyVal))
             ' Not IsEmpty guards the VBA trap IsNumeric(Empty) = True — a
-            ' blank amount must count as skipped, not sum as a silent zero
-            If Len(k) > 0 And Not IsEmpty(v) And IsNumeric(v) Then
+            ' blank amount must count as skipped, not sum as a silent zero.
+            ' VarType guards the sibling trap IsNumeric(True) = True with
+            ' CDbl(True) = -1 — a stray TRUE must skip, not sum as -1.00
+            If Len(k) > 0 And Not IsEmpty(v) And VarType(v) <> vbBoolean And IsNumeric(v) Then
                 If dict.Exists(k) Then
                     dict(k) = dict(k) + CDbl(v)
                 Else
