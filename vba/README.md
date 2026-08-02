@@ -8,7 +8,7 @@ Source lives here as importable `.bas` text files — never only inside a binary
 2. File → Import File… → pick the `.bas` module
 3. Save the workbook as `.xlsm`
 
-Both modules are self-contained: no library references to add (`modReconCompare` late-binds `Scripting.Dictionary`).
+Both modules are self-contained: no library references to add (`modReconCompare` late-binds `Scripting.Dictionary`). That binding also pins `modReconCompare` to Windows Excel — Mac Excel has no `Scripting.Dictionary` and no reference can supply it. `modWorkpaperFormat` runs on both.
 
 ## Modules
 

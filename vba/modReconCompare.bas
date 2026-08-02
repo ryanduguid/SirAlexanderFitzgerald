@@ -4,7 +4,8 @@ Option Explicit
 ' modReconCompare
 ' Keyed two-way reconciliation between two ranges — the "why doesn't the
 ' subledger agree to the GL" workhorse. Late-bound Scripting.Dictionary,
-' so no references need adding.
+' so no references need adding. Windows Excel only — Mac Excel has no
+' Scripting.Dictionary and no reference can supply it.
 ' Import via VBE: File > Import File...
 
 ' Compares two two-column ranges (key, amount). Writes a "Recon Result"
@@ -18,12 +19,24 @@ Option Explicit
 ' "001234" vs "1234" — two different keys, reported as two one-sided
 ' exceptions. Format both key columns the same way before running.
 '
+' Invisible characters ride in with pasted data: non-breaking spaces, tabs
+' and line breaks normalise to plain spaces before trimming, zero-width
+' spaces drop out. Trim$ alone leaves them, and a trailing non-breaking
+' space reports the same key unmatched on both sides with nothing visible
+' to explain it.
+'
 ' Example:
 '   CompareKeyedRanges Sheet1.Range("A2:B500"), Sheet2.Range("A2:B300"), 0.01
 Public Sub CompareKeyedRanges( _
     ByVal rangeA As Range, _
     ByVal rangeB As Range, _
     Optional ByVal tolerance As Double = 0.005)
+
+#If Mac Then
+    ' Scripting.Dictionary lives in the Windows-only scripting runtime — name
+    ' the platform instead of failing with a bare 429 on the first CreateObject.
+    Err.Raise 5, , "modReconCompare needs Scripting.Dictionary - Windows Excel only."
+#End If
 
     Dim skippedRows As Long
     skippedRows = 0
@@ -109,7 +122,7 @@ Public Sub CompareKeyedRanges( _
     ' A clean recon leaves outRow = 2 — the reversed corner pair would then
     ' normalise to the B1:D2 bounding box and format the header row.
     If outRow > 2 Then
-        ws.Range(ws.Cells(2, 2), ws.Cells(outRow - 1, 4)).NumberFormat = "#,##0.00;(#,##0.00);""-"""
+        ws.Range(ws.Cells(2, 2), ws.Cells(outRow - 1, 4)).NumberFormat = "#,##0.00_);(#,##0.00);""-""??_)"
     End If
     ws.Columns("A:D").AutoFit
 
@@ -155,7 +168,17 @@ Private Function SumByKey(ByVal source As Range, ByRef skippedRows As Long) As O
         If IsError(keyVal) Or IsError(v) Then
             skippedRows = skippedRows + 1
         Else
-            k = Trim$(CStr(keyVal))
+            ' Trim$ only sees plain spaces — a non-breaking space, tab or
+            ' line break pasted in with a key leaves it looking identical to
+            ' a clean one and matching nothing.
+            k = CStr(keyVal)
+            k = Replace$(k, ChrW$(160), " ")
+            k = Replace$(k, vbTab, " ")
+            k = Replace$(k, vbCrLf, " ")
+            k = Replace$(k, vbCr, " ")
+            k = Replace$(k, vbLf, " ")
+            k = Replace$(k, ChrW$(8203), "")
+            k = Trim$(k)
             ' Not IsEmpty guards the VBA trap IsNumeric(Empty) = True — a
             ' blank amount must count as skipped, not sum as a silent zero.
             ' VarType guards the sibling trap IsNumeric(True) = True with

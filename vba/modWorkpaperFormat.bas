@@ -64,7 +64,7 @@ End Sub
 ' Applies accounting number format (thousands separator, bracketed negatives,
 ' dash for zero) to a range — the format reviewers expect on workpapers.
 Public Sub FormatAsAccounting(ByVal target As Range)
-    target.NumberFormat = "#,##0.00;(#,##0.00);""-"""
+    target.NumberFormat = "#,##0.00_);(#,##0.00);""-""??_)"
 End Sub
 
 ' Freezes panes below the header block (the 5 rows ApplyWorkpaperHeader
