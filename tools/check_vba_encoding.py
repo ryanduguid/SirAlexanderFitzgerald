@@ -1,21 +1,30 @@
 #!/usr/bin/env python3
-"""Guard the .bas source against the VBE's ANSI import.
+"""Guard the VBA text source against the VBE's ANSI import.
 
-File > Import File... reads .bas source as system ANSI (cp1252 on an
-en-AU/en-US box), not UTF-8. A UTF-8 em dash in a comment arrives as three
-mojibake characters, and the VBE offers no encoding choice on import. Keeping
-the source pure ASCII makes the ANSI read lossless on every code page that is
+File > Import File... reads VBA source as system ANSI (cp1252 on an en-AU/en-US
+box), not UTF-8. A UTF-8 em dash in a comment arrives as three mojibake
+characters, and the VBE offers no encoding choice on import. Keeping the source
+pure ASCII makes the ANSI read lossless on every code page that is
 ASCII-compatible.
 
+The VBE's File > Export File... writes three text formats, and every one of
+them comes back in through that same ANSI import: .bas for a standard module,
+.cls for a class module, .frm for a form. All three are checked. The .frx
+companion a form export also writes is binary by design and is deliberately
+left out.
+
 The VBE also expects CRLF. A file checked out with bare LF imports as one long
-line, so .gitattributes pins *.bas to CRLF and this guard confirms the working
-tree actually matches.
+line, so .gitattributes pins *.bas, *.cls and *.frm to CRLF and this guard
+confirms the working tree actually matches.
 
 Run from anywhere:
 
     python tools/check_vba_encoding.py
 
-Exit status is 0 when every file passes, 1 when any file fails.
+Exit status is 0 when every file passes, 1 when any file fails. The guard has
+its own tests:
+
+    python -m unittest discover -s tests
 """
 
 from __future__ import annotations
@@ -27,6 +36,12 @@ MAX_ASCII = 0x7F
 UTF8_BOM = b"\xef\xbb\xbf"
 CR = 0x0D
 LF = 0x0A
+
+# Every text format the VBE exports and re-imports. Suffixes are compared
+# lowercased so a hand-renamed clsFoo.CLS is checked on Linux too, not only on
+# a case-insensitive filesystem.
+VBE_TEXT_SUFFIXES = (".bas", ".cls", ".frm")
+SUFFIX_PHRASE = ".bas, .cls or .frm"
 
 # Offsets listed per file before the report truncates. The count is always
 # reported in full, so truncation never hides the scale of a problem.
@@ -93,7 +108,11 @@ def check_file(path: Path) -> list[str]:
     return check_bytes(data)
 
 
-def collect_targets(argv: list[str]) -> list[Path]:
+def default_vba_dir() -> Path:
+    return Path(__file__).resolve().parent.parent / "vba"
+
+
+def collect_targets(argv: list[str], vba_dir: Path | None = None) -> list[Path]:
     if argv:
         targets = [Path(arg) for arg in argv]
         missing = [str(p) for p in targets if not p.is_file()]
@@ -101,19 +120,31 @@ def collect_targets(argv: list[str]) -> list[Path]:
             raise EncodingCheckError("no such file: %s" % ", ".join(sorted(missing)))
         return targets
 
-    vba_dir = Path(__file__).resolve().parent.parent / "vba"
-    if not vba_dir.is_dir():
-        raise EncodingCheckError("no vba directory at %s" % vba_dir)
-    targets = sorted(vba_dir.glob("*.bas"))
+    directory = default_vba_dir() if vba_dir is None else Path(vba_dir)
+    if not directory.is_dir():
+        raise EncodingCheckError("no vba directory at %s" % directory)
+    try:
+        entries = list(directory.iterdir())
+    except OSError as exc:
+        raise EncodingCheckError(
+            "cannot list %s: %s" % (directory, exc.strerror or exc)
+        ) from exc
+    targets = sorted(
+        path
+        for path in entries
+        if path.is_file() and path.suffix.lower() in VBE_TEXT_SUFFIXES
+    )
     if not targets:
         # A rename or a move must fail loudly. A guard that silently checks
         # nothing is worse than no guard.
-        raise EncodingCheckError("no .bas files found in %s" % vba_dir)
+        raise EncodingCheckError(
+            "no %s files found in %s" % (SUFFIX_PHRASE, directory)
+        )
     return targets
 
 
-def run(argv: list[str]) -> int:
-    targets = collect_targets(argv)
+def run(argv: list[str], vba_dir: Path | None = None) -> int:
+    targets = collect_targets(argv, vba_dir)
     failures = []
     for path in targets:
         problems = check_file(path)
@@ -135,9 +166,9 @@ def run(argv: list[str]) -> int:
     return 0
 
 
-def main(argv: list[str]) -> int:
+def main(argv: list[str], vba_dir: Path | None = None) -> int:
     try:
-        return run(argv)
+        return run(argv, vba_dir)
     except EncodingCheckError as exc:
         print("error: %s" % exc, file=sys.stderr)
         return 1
