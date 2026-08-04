@@ -41,3 +41,6 @@ __pycache__/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Workflow review scratch, not repo content.
+.superpowers/

@@ -123,16 +123,18 @@ def collect_targets(argv: list[str], vba_dir: Path | None = None) -> list[Path]:
     directory = default_vba_dir() if vba_dir is None else Path(vba_dir)
     if not directory.is_dir():
         raise EncodingCheckError("no vba directory at %s" % directory)
+    # rglob, not iterdir: the VBE's Export File... dialog remembers a folder,
+    # so an export filed one level down (vba/forms/, vba/classes/) is the
+    # normal way source arrives here. iterdir walked the top level only and
+    # passed those files with exit 0 while never opening them.
     try:
-        entries = list(directory.iterdir())
+        entries = [p for p in directory.rglob("*") if p.is_file()]
     except OSError as exc:
         raise EncodingCheckError(
             "cannot list %s: %s" % (directory, exc.strerror or exc)
         ) from exc
     targets = sorted(
-        path
-        for path in entries
-        if path.is_file() and path.suffix.lower() in VBE_TEXT_SUFFIXES
+        path for path in entries if path.suffix.lower() in VBE_TEXT_SUFFIXES
     )
     if not targets:
         # A rename or a move must fail loudly. A guard that silently checks
@@ -154,9 +156,14 @@ def run(argv: list[str], vba_dir: Path | None = None) -> int:
             print("ok   %s" % path)
 
     if failures:
+        # To stderr, with the "error:" line main() writes there. Split across
+        # the two streams, a redirected capture showed the per-file detail
+        # somewhere other than the summary it explains, or lost the ordering
+        # entirely when only one stream was buffered.
+        sys.stdout.flush()
         for path, problems in failures:
             for problem in problems:
-                print("FAIL %s: %s" % (path, problem))
+                print("FAIL %s: %s" % (path, problem), file=sys.stderr)
         raise EncodingCheckError(
             "%d of %d file(s) are not VBE-importable as written"
             % (len(failures), len(targets))

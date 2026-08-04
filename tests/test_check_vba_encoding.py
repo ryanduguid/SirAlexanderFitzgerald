@@ -93,7 +93,7 @@ class TestNonAsciiIsCaught(unittest.TestCase):
         with TempVbaDir() as vba:
             (vba / "modClean.bas").write_bytes(CLEAN_BAS)
             (vba / "clsProbe.cls").write_bytes(dirty_source("clsProbe"))
-            with redirect_stdout(io.StringIO()):
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
                 with self.assertRaises(guard.EncodingCheckError) as caught:
                     guard.run([], vba)
             self.assertIn("1 of 2 file(s)", str(caught.exception))
@@ -105,16 +105,44 @@ class TestNonAsciiIsCaught(unittest.TestCase):
             with redirect_stdout(out), redirect_stderr(err):
                 status = guard.main([], vba)
             self.assertEqual(status, 1)
-            self.assertTrue(err.getvalue().startswith("error: "))
-            self.assertIn("3 non-ASCII byte(s)", out.getvalue())
-            self.assertIn("clsProbe.cls", out.getvalue())
+            # Detail and summary share stderr: split across the two streams, a
+            # redirected capture showed them out of order or lost one.
+            self.assertIn("3 non-ASCII byte(s)", err.getvalue())
+            self.assertIn("clsProbe.cls", err.getvalue())
+            self.assertIn("error: ", err.getvalue())
+            self.assertNotIn("FAIL", out.getvalue())
 
     def test_non_ascii_frm_fails(self) -> None:
+        """Asserting only that SOME EncodingCheckError is raised passed under
+        the exact defect it claims to cover: drop .frm from VBE_TEXT_SUFFIXES
+        and collect_targets raises "no .bas, .cls or .frm files found", which
+        is the same exception type. The file has to be named as the failure."""
         with TempVbaDir() as vba:
             (vba / "frmProbe.frm").write_bytes(dirty_source("frmProbe"))
-            with redirect_stdout(io.StringIO()):
-                with self.assertRaises(guard.EncodingCheckError):
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                with self.assertRaises(guard.EncodingCheckError) as caught:
                     guard.run([], vba)
+            self.assertIn("1 of 1 file(s)", str(caught.exception))
+            self.assertIn("frmProbe.frm", str(guard.collect_targets([], vba)))
+            self.assertIn("3 non-ASCII byte(s)", " | ".join(
+                guard.check_file(vba / "frmProbe.frm")
+            ))
+
+    def test_a_subdirectory_export_is_checked_not_skipped(self) -> None:
+        """The VBE's Export File... dialog remembers a folder, so source
+        filed one level down is normal. iterdir walked the top level only and
+        passed those files with exit 0 while never opening them."""
+        with TempVbaDir() as vba:
+            (vba / "modTop.bas").write_bytes(CLEAN_BAS)
+            nested = vba / "forms"
+            nested.mkdir()
+            (nested / "frmNested.frm").write_bytes(dirty_source("frmNested"))
+            found = guard.collect_targets([], vba)
+            self.assertIn("frmNested.frm", " | ".join(str(p) for p in found))
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                with self.assertRaises(guard.EncodingCheckError) as caught:
+                    guard.run([], vba)
+            self.assertIn("1 of 2 file(s)", str(caught.exception))
 
     def test_bom_and_line_endings_still_checked_on_cls(self) -> None:
         with TempVbaDir() as vba:
@@ -176,7 +204,7 @@ class TestExplicitArguments(unittest.TestCase):
         with TempVbaDir() as vba:
             probe = vba / "clsProbe.cls"
             probe.write_bytes(dirty_source("clsProbe"))
-            with redirect_stdout(io.StringIO()):
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
                 with self.assertRaises(guard.EncodingCheckError):
                     guard.run([str(probe)])
 
