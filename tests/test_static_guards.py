@@ -39,8 +39,25 @@ class TrialBalanceFixtureTests(unittest.TestCase):
             ),
         )
 
+    def test_abn_validator_rejects_unexpected_formatting_and_conversion_errors(self):
+        source = (ROOT / "powerquery" / "Fx.ABNIsValid.pq").read_text(encoding="utf-8")
+        self.assertIn('allowedFormatting = Text.Select(raw, {"0".."9", " "}) = raw', source)
+        self.assertIn("textAttempt = try Text.From", source)
+        self.assertIn('if textAttempt[HasError] then ""', source)
+
+    def test_header_promoter_fails_clearly_for_zero_columns_or_blank_key(self):
+        source = (ROOT / "powerquery" / "Fx.PromoteHeaderAt.pq").read_text(encoding="utf-8")
+        self.assertIn("if List.IsEmpty(ColumnNames) then", source)
+        self.assertIn("Input table has no columns", source)
+        self.assertIn("Text.Trim(FirstHeaderValue) = \"\"", source)
+
 
 class ReconResultSafetyTests(unittest.TestCase):
+    def test_reconciliation_refuses_missing_ranges_and_negative_tolerance(self):
+        source = (ROOT / "vba" / "modReconCompare.bas").read_text(encoding="utf-8")
+        self.assertIn("If rangeA Is Nothing Or rangeB Is Nothing Then", source)
+        self.assertIn("If tolerance < 0 Then", source)
+
     def test_vba_requires_the_generated_sheet_marker_before_deleting(self):
         module = ROOT / "vba" / "modReconCompare.bas"
         source = module.read_text(encoding="utf-8")
