@@ -9,11 +9,168 @@ releasing changes to the modules.
 
 import csv
 import re
+import string
 import unittest
+from collections import namedtuple
+from decimal import Decimal
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+COMBINED_FIXTURE = ROOT / "samples" / "sample-xero-trial-balance.csv"
+SEPARATE_FIXTURE = ROOT / "samples" / "sample-xero-trial-balance-columns.csv"
+
+# Text.Select(c, {"0".."9", "A".."Z", "a".."z"}) in the M: ASCII only, so
+# str.isalnum() (which accepts every Unicode letter and digit) will not do.
+ASCII_ALNUM = frozenset(string.ascii_letters + string.digits)
+ASCII_DIGITS = frozenset(string.digits)
+
+Account = namedtuple("Account", "code name type debit credit")
+
+
+def _fixture_rows(path):
+    with path.open(newline="", encoding="utf-8") as f:
+        return list(csv.reader(f))
+
+
+def _header_index(rows, path):
+    """The header row is the one whose FIRST FIELD is exactly "Account" or
+    "Account Code" - the same test Xero.TrialBalance.pq runs."""
+    for index, row in enumerate(rows):
+        if row and row[0].strip() in ("Account", "Account Code"):
+            return index
+    raise AssertionError("no header row in %s" % path.name)
+
+
+def _is_code(candidate, whole_cell):
+    """The isCode predicate from Xero.TrialBalance.pq, ported.
+
+    Alphanumeric, at most 10 characters, at least one digit, and not the
+    whole cell - so "Rent (Sydney)" keeps its parenthetical.
+    """
+    if candidate is None or candidate == "" or candidate == whole_cell:
+        return False
+    if len(candidate) > 10:
+        return False
+    if not any(character in ASCII_DIGITS for character in candidate):
+        return False
+    return all(character in ASCII_ALNUM for character in candidate)
+
+
+def _split_combined_account(cell):
+    """The combined-layout code/name split, ported: trailing " (code)" first,
+    a "code - name" dash prefix as the fallback, otherwise no code."""
+    trimmed = cell.strip()
+
+    paren_candidate = None
+    if trimmed.endswith(")"):
+        paren_position = trimmed.rfind(" (")
+        if paren_position >= 0:
+            paren_candidate = trimmed[paren_position + 2 : len(trimmed) - 1]
+    dash_candidate = trimmed.split(" - ")[0] if " - " in trimmed else None
+
+    if _is_code(paren_candidate, trimmed):
+        code = paren_candidate
+    elif _is_code(dash_candidate, trimmed):
+        code = dash_candidate
+    else:
+        return None, trimmed
+
+    if trimmed.endswith(" (" + code + ")"):
+        return code, trimmed[: len(trimmed) - len(code) - 3]
+    return code, trimmed.split(" - ", 1)[1]
+
+
+def _parse_amount(cell):
+    """Blank is a genuine zero. Decimal, not float: the fixtures are money."""
+    text = cell.strip()
+    return Decimal("0") if text == "" else Decimal(text)
+
+
+def _parse_trial_balance(path, use_ytd=None):
+    """Xero.TrialBalance.pq's documented contract, ported for the fixtures.
+
+    CI has no Power Query host, so this executes the specification, not the
+    M. It is what makes the fixture assertions below about behaviour; the
+    source pins in the tests that follow are what catch the M drifting away
+    from it.
+    """
+    rows = _fixture_rows(path)
+    start = _header_index(rows, path)
+    header = [cell.strip() for cell in rows[start]]
+
+    split_layout = header[0] == "Account Code"
+    has_period = "Debit" in header and "Credit" in header
+    has_ytd = "YTD Debit" in header and "YTD Credit" in header
+
+    # Debit/Credit are the current-period MOVEMENT, YTD Debit/YTD Credit the
+    # AS-AT balances. Null (the default) prefers as-at; explicit true/false
+    # demands its pair and errors when the export lacks it.
+    if use_ytd is True:
+        if not has_ytd:
+            raise AssertionError("useYTD = true but %s has no YTD pair" % path.name)
+        take_ytd = True
+    elif use_ytd is False:
+        if not has_period:
+            raise AssertionError("useYTD = false but %s has no period pair" % path.name)
+        take_ytd = False
+    else:
+        take_ytd = has_ytd
+
+    debit_column = header.index("YTD Debit" if take_ytd else "Debit")
+    credit_column = header.index("YTD Credit" if take_ytd else "Credit")
+    type_column = header.index("Account Type")
+
+    accounts = []
+    for row in rows[start + 1 :]:
+        if not row:
+            continue
+        if split_layout:
+            code_cell, name_cell = row[0].strip(), row[1].strip()
+            if code_cell == "" and name_cell == "":
+                continue
+            if code_cell == "Total" or name_cell == "Total":
+                continue
+            code, name = (code_cell or None), name_cell
+        else:
+            cell = row[0].strip()
+            if cell in ("", "Total"):
+                continue
+            code, name = _split_combined_account(cell)
+        accounts.append(
+            Account(
+                code,
+                name,
+                row[type_column].strip(),
+                _parse_amount(row[debit_column]),
+                _parse_amount(row[credit_column]),
+            )
+        )
+    return accounts
+
+
+def _column_totals(path):
+    """Sum every amount column of a fixture, and read the fixture's own
+    trailing Total row - the one the parser drops - for comparison."""
+    rows = _fixture_rows(path)
+    start = _header_index(rows, path)
+    header = [cell.strip() for cell in rows[start]]
+    amount_columns = ["Debit", "Credit", "YTD Debit", "YTD Credit"]
+
+    summed = {name: Decimal("0") for name in amount_columns}
+    declared = {}
+    for row in rows[start + 1 :]:
+        if not row:
+            continue
+        is_total_row = any(cell.strip() == "Total" for cell in row[:2])
+        for name in amount_columns:
+            value = _parse_amount(row[header.index(name)])
+            if is_total_row:
+                declared[name] = value
+            else:
+                summed[name] += value
+    return summed, declared
 
 
 class TrialBalanceFixtureTests(unittest.TestCase):
@@ -27,6 +184,137 @@ class TrialBalanceFixtureTests(unittest.TestCase):
 
         self.assertIn(["Rent (Sydney)", "Expense", "", "", "", ""], combined)
         self.assertIn(["", "Rent (Sydney)", "Expense", "", "", "", ""], separate)
+
+    def test_both_fixtures_balance_and_match_their_own_total_row(self):
+        """README line 20 tells the reader the first check after loading a TB
+        is that debits equal credits.  Nothing checked that of the fixtures
+        themselves, so one mistyped amount would send everyone following those
+        instructions off to debug a parser that is working correctly."""
+        for path in (COMBINED_FIXTURE, SEPARATE_FIXTURE):
+            with self.subTest(fixture=path.name):
+                summed, declared = _column_totals(path)
+                self.assertEqual(summed["Debit"], summed["Credit"])
+                self.assertEqual(summed["YTD Debit"], summed["YTD Credit"])
+                self.assertEqual(summed["Debit"], Decimal("6995.00"))
+                self.assertEqual(summed["YTD Debit"], Decimal("129934.50"))
+                # The fixture's own Total row is a second opinion on the same
+                # numbers; the parser drops it, so it can drift unnoticed.
+                self.assertEqual(summed, declared)
+
+    def test_both_layouts_carry_the_same_accounts_and_amounts(self):
+        """README line 18 promises the same accounts and amounts in both
+        shapes.  Stripping the 090 code from the separate-column fixture, or
+        editing one amount in either, left the whole suite green."""
+
+        def projection(path):
+            as_at = _parse_trial_balance(path)
+            movement = _parse_trial_balance(path, use_ytd=False)
+            self.assertEqual(len(as_at), len(movement))
+            rows = [
+                (
+                    account.code,
+                    account.name,
+                    account.type,
+                    str(account.debit),
+                    str(account.credit),
+                    str(period.debit),
+                    str(period.credit),
+                )
+                for account, period in zip(as_at, movement)
+            ]
+            # A code-less account carries None, which will not sort against
+            # a str, so order on a stringified copy and keep the None.
+            return sorted(rows, key=lambda row: tuple(value or "" for value in row))
+
+        combined = projection(COMBINED_FIXTURE)
+        self.assertEqual(len(combined), 12)
+        self.assertEqual(combined, projection(SEPARATE_FIXTURE))
+
+    def test_default_takes_the_as_at_pair_and_useYTD_false_the_movement(self):
+        """The contract the README states: the default returns as-at
+        balances, useYTD = false returns the current-period movement.  The
+        two answers both balance, so a swap is invisible to the balance
+        check the README prescribes - only the totals tell them apart."""
+        for path in (COMBINED_FIXTURE, SEPARATE_FIXTURE):
+            with self.subTest(fixture=path.name):
+                as_at = _parse_trial_balance(path)
+                self.assertEqual(sum(a.debit for a in as_at), Decimal("129934.50"))
+                self.assertEqual(sum(a.credit for a in as_at), Decimal("129934.50"))
+                self.assertEqual(_parse_trial_balance(path, use_ytd=True), as_at)
+
+                movement = _parse_trial_balance(path, use_ytd=False)
+                self.assertEqual(sum(a.debit for a in movement), Decimal("6995.00"))
+                self.assertEqual(sum(a.credit for a in movement), Decimal("6995.00"))
+                self.assertNotEqual(movement, as_at)
+
+    def test_code_less_parenthetical_account_parses_with_no_code(self):
+        """The other half of README line 18: Rent (Sydney) must load with a
+        null AccountCode and its full name intact.  Split as code "Sydney" /
+        name "Rent" it collides with the real Rent (469) account in any lead
+        schedule keyed on AccountName."""
+        for path in (COMBINED_FIXTURE, SEPARATE_FIXTURE):
+            with self.subTest(fixture=path.name):
+                parsed = {(a.code, a.name) for a in _parse_trial_balance(path)}
+                self.assertIn((None, "Rent (Sydney)"), parsed)
+                self.assertNotIn(("Sydney", "Rent"), parsed)
+                self.assertIn(("469", "Rent"), parsed)
+                # Leading zero survives because codes are text, not numbers.
+                self.assertIn(("090", "Business Bank Account"), parsed)
+
+    def test_combined_parser_pins_the_is_code_predicate(self):
+        """Behaviour above is a specification; this is what fails when the M
+        drifts.  Drop the at-least-one-digit rule, or widen the 10-character
+        cap, and "Rent (Sydney)" splits into code "Sydney" / name "Rent"."""
+        source = (ROOT / "powerquery" / "Xero.TrialBalance.pq").read_text(encoding="utf-8")
+        self.assertRegex(
+            source,
+            re.compile(
+                r"isCode = \(c as nullable text\) as logical =>\s*"
+                r"c <> null\s*"
+                r'and c <> ""\s*'
+                r"and c <> trimmed\s*"
+                r"and Text\.Length\(c\) <= 10\s*"
+                r'and Text\.Select\(c, \{"0"\.\."9"\}\) <> ""\s*'
+                r'and Text\.Select\(c, \{"0"\.\."9", "A"\.\."Z", "a"\.\."z"\}\) = c,',
+                re.MULTILINE,
+            ),
+        )
+        # Binding the predicate is not using it.
+        self.assertIn("if isCode(parenCandidate) then parenCandidate", source)
+        self.assertIn("else if isCode(dashCandidate) then dashCandidate", source)
+
+    def test_combined_parser_pins_the_debit_credit_pair_selection(self):
+        """Both pairs balance, so choosing the wrong one still passes the
+        README's balance check and gives the accountant positive confirmation
+        of a materially wrong trial balance.  Pin all three branches: the
+        default prefers YTD, and each explicit choice errors rather than
+        falling back to the pair the caller did not ask for."""
+        source = (ROOT / "powerquery" / "Xero.TrialBalance.pq").read_text(encoding="utf-8")
+        self.assertRegex(
+            source,
+            re.compile(
+                r"takeYTD =\s*if useYTD = true then\s*if hasYTD then true\s*else error",
+                re.MULTILINE,
+            ),
+        )
+        self.assertRegex(
+            source,
+            re.compile(
+                r"else if useYTD = false then\s*if hasPeriod then false\s*else error",
+                re.MULTILINE,
+            ),
+        )
+        self.assertRegex(source, re.compile(r"else\s*hasYTD,\s*Selected =", re.MULTILINE))
+        # ... and that takeYTD = true means the YTD pair, not the other one.
+        self.assertRegex(
+            source,
+            re.compile(
+                r"else if takeYTD then\s*Table\.RenameColumns\(\s*"
+                r'Table\.RemoveColumns\(Promoted, \{"Debit", "Credit"\}, MissingField\.Ignore\),\s*'
+                r'\{\{"YTD Debit", "Debit"\}, \{"YTD Credit", "Credit"\}\}',
+                re.MULTILINE,
+            ),
+        )
 
     def test_combined_parser_guards_the_dash_fallback(self):
         source = (ROOT / "powerquery" / "Xero.TrialBalance.pq").read_text(encoding="utf-8")
@@ -83,6 +371,12 @@ class TrialBalanceFixtureTests(unittest.TestCase):
             source,
         )
         self.assertIn("Number.Mod(total, 89) = 0", source)
+        # The weights and the modulus were pinned; the subtract-one step was
+        # not.  Turning it into "+ 1" keeps both of those assertions passing
+        # and rejects the ATO's own published example, so every genuinely
+        # valid ABN in a supplier list is flagged invalid.
+        self.assertIn("adjusted = {digits{0} - 1} & List.Skip(digits, 1)", source)
+        self.assertIn("adjusted{_} * weights{_}", source)
 
         def abn_is_valid(value: str) -> bool:
             if set(value) - set("0123456789 "):
@@ -148,6 +442,23 @@ class TrialBalanceFixtureTests(unittest.TestCase):
             ),
         )
         self.assertNotIn("= FirstHeaderValue\n", source)
+
+    def test_financial_year_reads_a_datetimezone_at_its_own_wall_clock(self):
+        """Date.From on a datetimezone returns the date of the value's LOCAL
+        equivalent, so the HOST's zone decided the answer: 9am +10:00 on
+        1 July 2026 came out FY2027 on a Sydney desktop and FY2026 on a
+        UTC-hosted scheduled refresh.  The offset has to come off first."""
+        source = (ROOT / "powerquery" / "Fx.AUFinancialYear.pq").read_text(encoding="utf-8")
+        self.assertIn(
+            "normalised = if Value.Is(d, type datetimezone) "
+            "then DateTimeZone.RemoveZone(d) else d,",
+            source,
+        )
+        self.assertIn('asDate = Date.From(normalised, "en-AU"),', source)
+        self.assertNotIn('Date.From(d, "en-AU")', source)
+        self.assertLess(source.index("normalised ="), source.index("asDate ="))
+        # The header comment has to say which clock the caller gets.
+        self.assertIn("read at the wall clock it carries", source)
 
 
 class ReconResultSafetyTests(unittest.TestCase):
@@ -219,6 +530,60 @@ class ReconResultSafetyTests(unittest.TestCase):
         legacy = source[source.index("Private Function MarkerTaggedSheet") :]
         legacy = legacy[: legacy.index("End Function")]
         self.assertIn("RefersToRange", legacy)
+
+
+class WorkpaperFormatSafetyTests(unittest.TestCase):
+    """modReconCompare's write-safety guards are pinned here; this module's
+    were not, so every one of them could be deleted with CI green."""
+
+    def source(self):
+        return (ROOT / "vba" / "modWorkpaperFormat.bas").read_text(encoding="utf-8")
+
+    def test_header_cells_are_forced_to_text_before_the_write(self):
+        """An entity name starting with "=" - "=Smith & Co Pty Ltd" is a real
+        trading name shape once someone pastes from a formula cell - is stored
+        as a live formula unless the cells are text-formatted FIRST, and the
+        client name then renders as #NAME? on every page of the pack."""
+        source = self.source()
+        self.assertIn('.Range("A1:A4").NumberFormat = "@"', source)
+        self.assertLess(
+            source.index('.Range("A1:A4").NumberFormat = "@"'),
+            source.index('.Range("A1").Value = entityName'),
+        )
+
+    def test_header_insert_clears_the_clipboard_and_matches_the_freeze_default(self):
+        """A live cut/copy marquee turns Insert into a paste, so the clipboard
+        block lands in rows 1:5 instead of blank rows.  The inserted block and
+        FreezeBelowHeader's default have to stay the same five rows, or the
+        freeze lands inside the header."""
+        source = self.source()
+        self.assertIn("Application.CutCopyMode = False", source)
+        self.assertIn('ws.Rows("1:5").Insert Shift:=xlDown', source)
+        self.assertLess(
+            source.index("Application.CutCopyMode = False"),
+            source.index('ws.Rows("1:5").Insert'),
+        )
+        self.assertIn("Optional ByVal headerRows As Long = 5", source)
+
+    def test_every_writing_sub_refuses_a_protected_sheet(self):
+        source = self.source()
+        self.assertEqual(source.count("If ws.ProtectContents Then Err.Raise 5"), 3)
+        self.assertIn("If headerRows < 1 Then Err.Raise 5", source)
+        self.assertIn("If ws.Visible <> xlSheetVisible Then Err.Raise 5", source)
+
+    def test_last_row_search_reads_formulas_and_pins_its_own_settings(self):
+        """Find inherits the user's last Find-dialog settings when they are
+        not passed.  With LookIn:=xlValues a formula-only footer row is
+        invisible, and the reviewer sign-off is written over live data."""
+        source = self.source()
+        self.assertIn("LookIn:=xlFormulas", source)
+        self.assertIn("LookAt:=xlPart", source)
+        self.assertIn("SearchOrder:=xlByRows", source)
+        self.assertIn("SearchDirection:=xlPrevious", source)
+
+    def test_module_stays_crlf_for_the_vbe_import(self):
+        module = ROOT / "vba" / "modWorkpaperFormat.bas"
+        self.assertNotIn(b"\n", module.read_bytes().replace(b"\r\n", b""))
 
 
 if __name__ == "__main__":
