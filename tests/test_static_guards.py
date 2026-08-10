@@ -29,18 +29,36 @@ ASCII_DIGITS = frozenset(string.digits)
 Account = namedtuple("Account", "code name type debit credit")
 
 
+class TrialBalanceError(Exception):
+    """What the ported parser raises where the M raises. A distinct type, so
+    a test can assert the refusal without assertRaises(AssertionError)
+    swallowing a genuine assertion failure from the same block."""
+
+
 def _fixture_rows(path):
     with path.open(newline="", encoding="utf-8") as f:
         return list(csv.reader(f))
 
 
-def _header_index(rows, path):
+def _header_index(rows, name):
     """The header row is the one whose FIRST FIELD is exactly "Account" or
     "Account Code" - the same test Xero.TrialBalance.pq runs."""
     for index, row in enumerate(rows):
         if row and row[0].strip() in ("Account", "Account Code"):
             return index
-    raise AssertionError("no header row in %s" % path.name)
+    raise TrialBalanceError("no header row in %s" % name)
+
+
+def _without_ytd_columns(rows, name):
+    """The same rows as a pre-YTD Xero export: every YTD column dropped.
+
+    Both committed fixtures carry both pairs, which is what makes the
+    default and useYTD = true the same column choice on them. This is the
+    export shape that tells those two branches apart.
+    """
+    header = [cell.strip() for cell in rows[_header_index(rows, name)]]
+    keep = [index for index, cell in enumerate(header) if not cell.startswith("YTD ")]
+    return [[row[index] for index in keep if index < len(row)] for row in rows]
 
 
 def _is_code(candidate, whole_cell):
@@ -89,6 +107,10 @@ def _parse_amount(cell):
 
 
 def _parse_trial_balance(path, use_ytd=None):
+    return _parse_rows(_fixture_rows(path), path.name, use_ytd=use_ytd)
+
+
+def _parse_rows(rows, name, use_ytd=None):
     """Xero.TrialBalance.pq's documented contract, ported for the fixtures.
 
     CI has no Power Query host, so this executes the specification, not the
@@ -96,8 +118,7 @@ def _parse_trial_balance(path, use_ytd=None):
     source pins in the tests that follow are what catch the M drifting away
     from it.
     """
-    rows = _fixture_rows(path)
-    start = _header_index(rows, path)
+    start = _header_index(rows, name)
     header = [cell.strip() for cell in rows[start]]
 
     split_layout = header[0] == "Account Code"
@@ -109,11 +130,11 @@ def _parse_trial_balance(path, use_ytd=None):
     # demands its pair and errors when the export lacks it.
     if use_ytd is True:
         if not has_ytd:
-            raise AssertionError("useYTD = true but %s has no YTD pair" % path.name)
+            raise TrialBalanceError("useYTD = true but %s has no YTD pair" % name)
         take_ytd = True
     elif use_ytd is False:
         if not has_period:
-            raise AssertionError("useYTD = false but %s has no period pair" % path.name)
+            raise TrialBalanceError("useYTD = false but %s has no period pair" % name)
         take_ytd = False
     else:
         take_ytd = has_ytd
@@ -154,7 +175,7 @@ def _column_totals(path):
     """Sum every amount column of a fixture, and read the fixture's own
     trailing Total row - the one the parser drops - for comparison."""
     rows = _fixture_rows(path)
-    start = _header_index(rows, path)
+    start = _header_index(rows, path.name)
     header = [cell.strip() for cell in rows[start]]
     amount_columns = ["Debit", "Credit", "YTD Debit", "YTD Credit"]
 
@@ -174,6 +195,27 @@ def _column_totals(path):
 
 
 class TrialBalanceFixtureTests(unittest.TestCase):
+    def test_the_readme_promises_these_tests_quote_are_still_in_the_readme(self):
+        """The docstrings below justify themselves by quoting the README.  A
+        quote beats a line number - a one-line insert moves every number and
+        makes the comment silently false - but a reworded sentence would rot
+        a quote just as quietly, so the sentences are pinned here.  This pins
+        the side that changes: if a rewrite lands, this fails and names the
+        docstrings that have to be rewritten with it."""
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        for quoted in (
+            # test_both_fixtures_balance_and_match_their_own_total_row
+            "After loading a TB, the first check is always",
+            # test_both_layouts_carry_the_same_accounts_and_amounts
+            "carrying the same accounts and amounts in both shapes",
+            # test_code_less_parenthetical_account_parses_with_no_code
+            "it must load with a null `AccountCode` and its full name intact",
+            # test_default_takes_the_as_at_pair_and_useYTD_false_the_movement
+            "default returns as-at, `useYTD = false` for movement",
+        ):
+            with self.subTest(quoted=quoted):
+                self.assertIn(quoted, readme)
+
     def test_code_less_parenthetical_account_is_present_in_both_layouts(self):
         with (ROOT / "samples" / "sample-xero-trial-balance.csv").open(newline="", encoding="utf-8") as f:
             combined = list(csv.reader(f))
@@ -186,10 +228,11 @@ class TrialBalanceFixtureTests(unittest.TestCase):
         self.assertIn(["", "Rent (Sydney)", "Expense", "", "", "", ""], separate)
 
     def test_both_fixtures_balance_and_match_their_own_total_row(self):
-        """README line 20 tells the reader the first check after loading a TB
-        is that debits equal credits.  Nothing checked that of the fixtures
-        themselves, so one mistyped amount would send everyone following those
-        instructions off to debug a parser that is working correctly."""
+        """The README: "After loading a TB, the first check is always" that
+        debits equal credits within tolerance.  Nothing checked that of the
+        fixtures themselves, so one mistyped amount would send everyone
+        following those instructions off to debug a parser that is working
+        correctly."""
         for path in (COMBINED_FIXTURE, SEPARATE_FIXTURE):
             with self.subTest(fixture=path.name):
                 summed, declared = _column_totals(path)
@@ -202,9 +245,10 @@ class TrialBalanceFixtureTests(unittest.TestCase):
                 self.assertEqual(summed, declared)
 
     def test_both_layouts_carry_the_same_accounts_and_amounts(self):
-        """README line 18 promises the same accounts and amounts in both
-        shapes.  Stripping the 090 code from the separate-column fixture, or
-        editing one amount in either, left the whole suite green."""
+        """The README calls the two fixtures "fabricated, balanced TBs
+        carrying the same accounts and amounts in both shapes".  Stripping
+        the 090 code from the separate-column fixture, or editing one amount
+        in either, left the whole suite green."""
 
         def projection(path):
             as_at = _parse_trial_balance(path)
@@ -231,25 +275,39 @@ class TrialBalanceFixtureTests(unittest.TestCase):
         self.assertEqual(combined, projection(SEPARATE_FIXTURE))
 
     def test_default_takes_the_as_at_pair_and_useYTD_false_the_movement(self):
-        """The contract the README states: the default returns as-at
-        balances, useYTD = false returns the current-period movement.  The
-        two answers both balance, so a swap is invisible to the balance
-        check the README prescribes - only the totals tell them apart."""
+        """The contract the README states, in "picks the right Debit/Credit
+        pair (plain pair = period movement, YTD pair = as-at balances;
+        default returns as-at, `useYTD = false` for movement)".  The two
+        answers both balance, so a swap is invisible to the balance check the
+        README prescribes - only the totals tell them apart."""
         for path in (COMBINED_FIXTURE, SEPARATE_FIXTURE):
             with self.subTest(fixture=path.name):
                 as_at = _parse_trial_balance(path)
                 self.assertEqual(sum(a.debit for a in as_at), Decimal("129934.50"))
                 self.assertEqual(sum(a.credit for a in as_at), Decimal("129934.50"))
-                self.assertEqual(_parse_trial_balance(path, use_ytd=True), as_at)
 
                 movement = _parse_trial_balance(path, use_ytd=False)
                 self.assertEqual(sum(a.debit for a in movement), Decimal("6995.00"))
                 self.assertEqual(sum(a.credit for a in movement), Decimal("6995.00"))
                 self.assertNotEqual(movement, as_at)
 
+                # Asserting useYTD = true equals the default on a fixture
+                # that carries both pairs compares the port with itself:
+                # both reach take_ytd = True down the same branch.  The
+                # branch worth exercising is the export WITHOUT the YTD
+                # pair, where the default falls back to the movement and
+                # useYTD = true has to refuse rather than hand back the
+                # movement labelled as an as-at balance.
+                rows = _without_ytd_columns(_fixture_rows(path), path.name)
+                self.assertEqual(_parse_rows(rows, path.name), movement)
+                with self.assertRaises(TrialBalanceError) as refused:
+                    _parse_rows(rows, path.name, use_ytd=True)
+                self.assertIn("no YTD pair", str(refused.exception))
+
     def test_code_less_parenthetical_account_parses_with_no_code(self):
-        """The other half of README line 18: Rent (Sydney) must load with a
-        null AccountCode and its full name intact.  Split as code "Sydney" /
+        """The other half of the same README sentence: the fixtures "include
+        a code-less `Rent (Sydney)` account: it must load with a null
+        `AccountCode` and its full name intact".  Split as code "Sydney" /
         name "Rent" it collides with the real Rent (469) account in any lead
         schedule keyed on AccountName."""
         for path in (COMBINED_FIXTURE, SEPARATE_FIXTURE):
@@ -282,6 +340,33 @@ class TrialBalanceFixtureTests(unittest.TestCase):
         # Binding the predicate is not using it.
         self.assertIn("if isCode(parenCandidate) then parenCandidate", source)
         self.assertIn("else if isCode(dashCandidate) then dashCandidate", source)
+
+    def test_combined_parser_pins_the_name_left_by_the_split(self):
+        """The other arm of the same code/name split.  isCode decides which
+        text is the code; this decides what is left as the name, and it is
+        arithmetic on lengths - the " (" and the ")" it strips are three
+        characters.  Change that 3 to a 2 and "Business Bank Account (090)"
+        loads as "Business Bank Account " with a trailing space, which
+        silently breaks every lead schedule and recon keyed on AccountName;
+        the isCode pin above and every fixture assertion stay green, because
+        the code itself is still "090"."""
+        source = (ROOT / "powerquery" / "Xero.TrialBalance.pq").read_text(encoding="utf-8")
+        self.assertRegex(
+            source,
+            re.compile(
+                r'WithName = Table\.AddColumn\(\s*WithCode,\s*"AccountName",\s*each\s*'
+                r"let trimmed = Text\.Trim\(\[Account\]\)\s*in\s*"
+                r"if \[AccountCode\] = null then trimmed\s*"
+                r'else if Text\.EndsWith\(trimmed, " \(" & \[AccountCode\] & "\)"\)\s*'
+                r"then Text\.Start\(\s*trimmed,\s*"
+                r"Text\.Length\(trimmed\) - Text\.Length\(\[AccountCode\]\) - 3\s*\)\s*"
+                r'else Text\.AfterDelimiter\(trimmed, " - "\),',
+                re.MULTILINE,
+            ),
+        )
+        # The derived name replaces the raw combined cell rather than
+        # sitting beside it, so nothing downstream can read the unsplit one.
+        self.assertIn('Table.RemoveColumns(WithName, {"Account"})', source)
 
     def test_combined_parser_pins_the_debit_credit_pair_selection(self):
         """Both pairs balance, so choosing the wrong one still passes the
@@ -443,22 +528,35 @@ class TrialBalanceFixtureTests(unittest.TestCase):
         )
         self.assertNotIn("= FirstHeaderValue\n", source)
 
-    def test_financial_year_reads_a_datetimezone_at_its_own_wall_clock(self):
+    def test_financial_year_switches_a_datetimezone_to_australian_eastern(self):
         """Date.From on a datetimezone returns the date of the value's LOCAL
         equivalent, so the HOST's zone decided the answer: 9am +10:00 on
         1 July 2026 came out FY2027 on a Sydney desktop and FY2026 on a
-        UTC-hosted scheduled refresh.  The offset has to come off first."""
+        UTC-hosted scheduled refresh.  The offset has to be resolved before
+        the date is taken, and CONVERTED rather than dropped: RemoveZone on
+        its own is host-independent too, but it reads the UTC-stamped
+        2026-06-30T14:30:00Z - the shape the Xero API returns for 12:30am on
+        1 July in Sydney - as 30 June, which is the wrong FY on the AU
+        desktop that the old code got right."""
         source = (ROOT / "powerquery" / "Fx.AUFinancialYear.pq").read_text(encoding="utf-8")
-        self.assertIn(
-            "normalised = if Value.Is(d, type datetimezone) "
-            "then DateTimeZone.RemoveZone(d) else d,",
+        self.assertRegex(
             source,
+            re.compile(
+                r"normalised =\s*"
+                r"if Value\.Is\(d, type datetimezone\)\s*"
+                r"then DateTimeZone\.RemoveZone\(DateTimeZone\.SwitchZone\(d, 10\)\)\s*"
+                r"else d,",
+                re.MULTILINE,
+            ),
         )
         self.assertIn('asDate = Date.From(normalised, "en-AU"),', source)
         self.assertNotIn('Date.From(d, "en-AU")', source)
         self.assertLess(source.index("normalised ="), source.index("asDate ="))
-        # The header comment has to say which clock the caller gets.
-        self.assertIn("read at the wall clock it carries", source)
+        # The header comment has to say which clock the caller gets, and warn
+        # the states that AEST is not their own local calendar.
+        self.assertIn("CONVERTED to Australian Eastern Standard Time (+10:00)", source)
+        self.assertIn("Residual:", source)
+        self.assertIn("Adelaide/Darwin", source)
 
 
 class ReconResultSafetyTests(unittest.TestCase):
@@ -477,7 +575,11 @@ class ReconResultSafetyTests(unittest.TestCase):
         self.assertIn("Application.DisplayAlerts = previousAlerts", source)
         self.assertLess(source.index("If Not IsGeneratedResultSheet(wb, stale) Then"), source.index("stale.Delete"))
         self.assertNotIn('wb.Sheets("Recon Result").Delete', source)
-        self.assertNotIn(b"\n", module.read_bytes().replace(b"\r\n", b""))
+        # Both halves of CRLF: a CR-only module survives a bare-LF check
+        # untouched and imports into the VBE as one line.
+        stripped = module.read_bytes().replace(b"\r\n", b"")
+        self.assertNotIn(b"\n", stripped)
+        self.assertNotIn(b"\r", stripped)
 
     def test_dead_marker_is_cleaned_up_instead_of_raised_at_the_user(self):
         """Deleting the generated sheet by hand used to brick the macro: the
@@ -539,6 +641,13 @@ class WorkpaperFormatSafetyTests(unittest.TestCase):
     def source(self):
         return (ROOT / "vba" / "modWorkpaperFormat.bas").read_text(encoding="utf-8")
 
+    def sub_body(self, name):
+        """One Public Sub's text, so a guard is pinned to the sub it belongs
+        to instead of merely being counted somewhere in the module."""
+        source = self.source()
+        start = source.index("Public Sub " + name)
+        return source[start : source.index("End Sub", start)]
+
     def test_header_cells_are_forced_to_text_before_the_write(self):
         """An entity name starting with "=" - "=Smith & Co Pty Ltd" is a real
         trading name shape once someone pastes from a formula cell - is stored
@@ -565,11 +674,27 @@ class WorkpaperFormatSafetyTests(unittest.TestCase):
         )
         self.assertIn("Optional ByVal headerRows As Long = 5", source)
 
-    def test_every_writing_sub_refuses_a_protected_sheet(self):
-        source = self.source()
-        self.assertEqual(source.count("If ws.ProtectContents Then Err.Raise 5"), 3)
-        self.assertIn("If headerRows < 1 Then Err.Raise 5", source)
-        self.assertIn("If ws.Visible <> xlSheetVisible Then Err.Raise 5", source)
+    def test_each_worksheet_taking_sub_refuses_a_protected_sheet(self):
+        """Every sub that takes a Worksheet refuses a protected one, checked
+        inside each sub rather than by counting the guard module-wide.
+
+        This deliberately does NOT claim every writing sub is guarded: the
+        fourth public sub, FormatAsAccounting, takes a Range and carries no
+        worksheet-level guard, so a name promising all four would be false.
+        The module-wide count is a floor rather than an equality for the same
+        reason - pinning it at exactly three would fail the very change that
+        adds a guard to FormatAsAccounting.
+        """
+        guard = "If ws.ProtectContents Then Err.Raise 5"
+        for name in ("ApplyWorkpaperHeader", "AddReviewerLine", "FreezeBelowHeader"):
+            with self.subTest(sub=name):
+                self.assertIn(guard, self.sub_body(name))
+        self.assertGreaterEqual(self.source().count(guard), 3)
+        self.assertIn("If headerRows < 1 Then Err.Raise 5", self.sub_body("FreezeBelowHeader"))
+        self.assertIn(
+            "If ws.Visible <> xlSheetVisible Then Err.Raise 5",
+            self.sub_body("FreezeBelowHeader"),
+        )
 
     def test_last_row_search_reads_formulas_and_pins_its_own_settings(self):
         """Find inherits the user's last Find-dialog settings when they are
@@ -582,8 +707,14 @@ class WorkpaperFormatSafetyTests(unittest.TestCase):
         self.assertIn("SearchDirection:=xlPrevious", source)
 
     def test_module_stays_crlf_for_the_vbe_import(self):
+        """CRLF means both halves.  Stripping CRLF pairs and looking only for
+        a bare LF passes a CR-only file untouched - nothing is stripped and
+        there is no LF to find - and the VBE imports CR-only source as a
+        single line, destroying the module."""
         module = ROOT / "vba" / "modWorkpaperFormat.bas"
-        self.assertNotIn(b"\n", module.read_bytes().replace(b"\r\n", b""))
+        stripped = module.read_bytes().replace(b"\r\n", b"")
+        self.assertNotIn(b"\n", stripped)
+        self.assertNotIn(b"\r", stripped)
 
 
 if __name__ == "__main__":
