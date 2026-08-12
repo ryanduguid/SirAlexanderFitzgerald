@@ -93,8 +93,8 @@ try {
     $previousAutomationSecurity = $excel.AutomationSecurity
     $excel.Visible = $false
     $excel.DisplayAlerts = $false
-    # msoAutomationSecurityForceDisable: no workbook opened by this harness may
-    # execute embedded macros. Imported text modules run only when Vba is asked.
+    # msoAutomationSecurityForceDisable: no workbook opened by this Power Query
+    # harness may execute embedded macros. This runner never imports VBA.
     $excel.AutomationSecurity = 3
     $workbook = $excel.Workbooks.Add()
     # Power Query's $Workbook$ provider is materially more stable when the
