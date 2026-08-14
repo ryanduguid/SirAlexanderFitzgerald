@@ -20,6 +20,8 @@ sha256sum --check SHA256SUMS
 gh attestation verify accounting-excel-toolkit-0.1.1.zip -R ryanduguid/accounting-excel-toolkit
 gh attestation verify accounting-excel-toolkit-0.1.1.zip -R ryanduguid/accounting-excel-toolkit --predicate-type https://spdx.dev/Document/v2.3
 gh release view v0.1.1 -R ryanduguid/accounting-excel-toolkit --json isImmutable
+gh release verify v0.1.1 -R ryanduguid/accounting-excel-toolkit
+gh release verify-asset v0.1.1 accounting-excel-toolkit-0.1.1.zip -R ryanduguid/accounting-excel-toolkit
 ```
 
 If any gate fails, leave the tag and any draft release untouched until the failure is understood. Never move an already published tag.
