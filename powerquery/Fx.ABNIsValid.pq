@@ -11,7 +11,7 @@
 // Returns false for null, malformed formatting, anything that isn't 11 digits
 // after removing spaces, and for a leading zero: no ABN starts with 0, and the
 // checksum alone can't reject one ("00000090000" sums to exactly 89).
-// Checksum validity does not mean the ABN is registered or active — check
+// Checksum validity does not mean the ABN is registered or active. Check
 // ABN Lookup (abr.business.gov.au) for registration status.
 //
 // Usage: Fx.ABNIsValid("51 824 753 556")  // true (ATO's published example)
@@ -19,7 +19,7 @@ let
     ABNIsValid = (abn as any) as logical =>
         let
             textAttempt = try Text.From(abn ?? "", "en-AU"),
-            // Validate the converted value before normalization. Text.Trim also
+            // Validate the converted value before normalisation. Text.Trim also
             // removes tabs, newlines, and other whitespace that this contract rejects.
             raw = if textAttempt[HasError] then "" else textAttempt[Value],
             allowedFormatting = Text.Select(raw, {"0".."9", " "}) = raw,
