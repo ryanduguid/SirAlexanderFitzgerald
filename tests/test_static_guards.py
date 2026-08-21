@@ -146,7 +146,7 @@ class NativeExcelAcceptanceSafetyTests(unittest.TestCase):
         # itself empty when a -File parameter default is evaluated.
         self.assertRegex(
             parameter_block,
-            r"(?m)^\s*\[string\]\$RepositoryRoot\s*$",
+            r"(?m)^\s*\[string\]\$RepositoryRoot,?\s*$",
         )
         self.assertNotRegex(parameter_block, r"\$RepositoryRoot\s*=")
         self.assertNotIn("$PSScriptRoot", parameter_block)
@@ -196,8 +196,64 @@ class NativeExcelAcceptanceSafetyTests(unittest.TestCase):
         self.assertNotIn("accounting-excel-toolkit-native-", source)
         self.assertIn("samples\\sample-payday-super-report.csv", source)
         self.assertIn("PaydaySuper_Report", source)
+        self.assertIn("ZZ_CoreChecks", source)
+        self.assertIn("ZZ_PaydayBaseChecks", source)
+        self.assertIn("ZZ_PaydayExtraCheck", source)
+        self.assertIn("$paydayCheckQueries", source)
+        self.assertIn("ExpectedRows = 6", source)
+        self.assertIn("$querySpecifications = @(\n        if ($CheckSet -eq 'Core')", source)
+        self.assertIn(
+            "List.Sum(PaydaySuper_Report($mPaydayBadAmount)[sg_amount])",
+            source,
+        )
+        self.assertIn(
+            "Value.Metadata(PaydaySuper_Report($mPaydayNoProvenance))"
+            "[PaydaySuperProvenance]",
+            source,
+        )
+        self.assertIn(
+            "$expectedChildCount = if ($childSet -eq 'Core') { 46 } else { 12 }",
+            source,
+        )
+        self.assertIn("if ($childRows.Count -ne $expectedChildCount)", source)
         self.assertIn("if ($rowCount -ne 58)", source)
+        self.assertIn("[ValidateSet('All', 'Core', 'Payday')]", source)
+        self.assertIn("-CheckSet $childSet", source)
+        self.assertIn("-ResultPath $resultFile", source)
+        self.assertIn("ConvertFrom-Json -ErrorAction Stop", source)
+        self.assertIn("native acceptance child exited", source)
+        self.assertIn("returned a malformed check row", source)
+        self.assertIn("Core and Payday children ran against different Excel", source)
         self.assertNotIn("WScript.Shell", source)
+
+    @unittest.skipUnless(
+        sys.platform == "win32" and shutil.which("powershell.exe"),
+        "requires Windows PowerShell 5.1",
+    )
+    def test_native_child_modes_require_a_private_result_path_before_excel(self):
+        script = ROOT / "tools" / "native_excel_acceptance.ps1"
+        result = subprocess.run(
+            [
+                shutil.which("powershell.exe"),
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(script),
+                "-RepositoryRoot",
+                str(ROOT),
+                "-CheckSet",
+                "Core",
+            ],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            check=False,
+        )
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 1, output)
+        self.assertIn("require the private ResultPath argument", output)
+        self.assertNotIn("Desktop Microsoft Excel could not be started", output)
 
     @unittest.skipUnless(
         sys.platform == "win32" and shutil.which("powershell.exe"),

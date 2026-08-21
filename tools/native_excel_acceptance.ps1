@@ -4,20 +4,35 @@
 Runs the repository's Power Query acceptance checks in desktop Excel.
 
 .DESCRIPTION
-Loads every checked-in .pq file into a disposable workbook and evaluates 58
-checks in Excel's real Power Query engine. The checks cover both fabricated
-Xero trial-balance layouts, financial-year boundaries, ABN validation, header
-promotion, and adverse and lazy-evaluation branches.
+Evaluates 58 checks in Excel's real Power Query engine. The default All mode
+isolates the 46 core checks and 12 Payday Super checks in fresh child
+PowerShell and Excel processes. The Payday child materialises its seven
+fabricated file sources through independent single-source queries so Excel's
+cross-source privacy/firewall composition state cannot mask adapter behaviour.
+The checks cover both fabricated Xero trial-balance layouts, financial-year
+boundaries, ABN validation, header promotion, and adverse and lazy-evaluation
+branches.
 
 This runner requires Windows, Windows PowerShell 5.1 or newer, desktop
 Microsoft Excel, Power Query, and the Microsoft.Mashup.OleDb.1 provider. It
 does not import or execute VBA. Repository sources and sample files are read
-only. Generated fixtures and the workbook live in a GUID-named directory under
-the operating system's temporary directory and are removed in finally.
+only. Generated fixtures, workbooks and private child results live in
+GUID-named directories under the operating system's temporary directory and
+are removed in finally.
 
 .PARAMETER RepositoryRoot
 Path to the repository checkout to test. By default this is the
 repository containing this script.
+
+.PARAMETER CheckSet
+Internal isolation mode. The default All mode launches fresh child PowerShell
+processes for the 46 core checks and 12 Payday Super checks. Core and Payday
+are child modes so Excel's Mashup host cannot carry file-source state from one
+group into the other.
+
+.PARAMETER ResultPath
+Private child-process result path. All mode creates this path beneath a
+GUID-named temporary directory; direct callers should not set it.
 
 .EXAMPLE
 powershell -NoProfile -File .\tools\native_excel_acceptance.ps1
@@ -29,7 +44,10 @@ powershell -NoProfile -File .\tools\native_excel_acceptance.ps1 -RepositoryRoot 
 param(
     [Parameter(Position = 0)]
     [ValidateNotNullOrEmpty()]
-    [string]$RepositoryRoot
+    [string]$RepositoryRoot,
+    [ValidateSet('All', 'Core', 'Payday')]
+    [string]$CheckSet = 'All',
+    [string]$ResultPath
 )
 
 $ErrorActionPreference = 'Stop'
@@ -114,6 +132,58 @@ function Release-ComReference {
     }
 }
 
+function ConvertFrom-NativeCheckValues {
+    param(
+        [Parameter(Mandatory = $true)]
+        [array]$Values
+    )
+
+    $rows = @()
+    $rowLower = $Values.GetLowerBound(0)
+    $rowUpper = $Values.GetUpperBound(0)
+    $columnLower = $Values.GetLowerBound(1)
+    for ($row = $rowLower; $row -le $rowUpper; $row++) {
+        $passValue = $Values[$row, ($columnLower + 3)]
+        $rows += [pscustomobject]@{
+            Check = [string]$Values[$row, $columnLower]
+            Expected = [string]$Values[$row, ($columnLower + 1)]
+            Actual = [string]$Values[$row, ($columnLower + 2)]
+            Pass = (($passValue -eq $true) -or ([string]$passValue -eq 'TRUE'))
+        }
+    }
+    return $rows
+}
+
+function Write-NativeCheckSummary {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object[]]$Rows,
+        [Parameter(Mandatory = $true)]
+        [string]$ExcelVersion,
+        [Parameter(Mandatory = $true)]
+        [string]$ExcelBuild
+    )
+
+    Write-Host ''
+    Write-Host (
+        'Excel {0} build {1}; locale {2}' -f
+            $ExcelVersion,
+            $ExcelBuild,
+            (Get-Culture).Name
+    )
+    Write-Host ('-' * 78)
+    foreach ($row in $Rows) {
+        Write-Host ('{0}  {1}' -f $(if ($row.Pass) { 'PASS' } else { 'FAIL' }), $row.Check)
+        if (-not $row.Pass) {
+            Write-Host ('        expected [{0}]  actual [{1}]' -f $row.Expected, $row.Actual)
+        }
+    }
+    $failedChecks = @($Rows | Where-Object { -not $_.Pass }).Count
+    Write-Host ('-' * 78)
+    Write-Host ('{0} checks, {1} failed' -f $Rows.Count, $failedChecks)
+    return $failedChecks
+}
+
 if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
     throw 'Native Excel acceptance requires Windows and desktop Microsoft Excel.'
 }
@@ -143,6 +213,162 @@ if ($powerQueryFiles.Count -eq 0) {
 }
 
 $systemTemporaryRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
+
+if ($CheckSet -eq 'All') {
+    if (-not [string]::IsNullOrWhiteSpace($ResultPath)) {
+        throw 'ResultPath is private to Core and Payday child processes.'
+    }
+
+    $parentTemporaryDirectory = Join-Path $systemTemporaryRoot (
+        'accounting-excel-toolkit-native-' + [guid]::NewGuid().ToString('D')
+    )
+    $parentTemporaryDirectory = [IO.Path]::GetFullPath($parentTemporaryDirectory)
+    if (-not (Test-SafeTemporaryDirectory $parentTemporaryDirectory $systemTemporaryRoot)) {
+        throw "Refusing to use unexpected parent temporary path: $parentTemporaryDirectory"
+    }
+
+    $parentExitCode = 1
+    $parentDirectoryCreated = $false
+    try {
+        New-Item -ItemType Directory -Path $parentTemporaryDirectory | Out-Null
+        $parentDirectoryCreated = $true
+
+        $childPowerShell = Join-Path $PSHOME 'powershell.exe'
+        if (-not (Test-Path -LiteralPath $childPowerShell -PathType Leaf)) {
+            throw "Windows PowerShell child executable is missing: $childPowerShell"
+        }
+        $scriptFile = $MyInvocation.MyCommand.Path
+        if ([string]::IsNullOrWhiteSpace($scriptFile)) {
+            throw 'Could not determine the native acceptance script path for child execution.'
+        }
+
+        # Run the Payday file-source group first. Desktop Excel's Mashup host
+        # can retain the larger core group's source environment briefly after
+        # that child exits; the reverse order has no dependency and keeps both
+        # groups isolated without weakening either check set.
+        $childPayloads = @{}
+        foreach ($childSet in @('Payday', 'Core')) {
+            $resultFile = Join-Path $parentTemporaryDirectory (
+                $childSet.ToLowerInvariant() + '-result.json'
+            )
+            & $childPowerShell `
+                -NoLogo `
+                -NoProfile `
+                -NonInteractive `
+                -File $scriptFile `
+                -RepositoryRoot $repository `
+                -CheckSet $childSet `
+                -ResultPath $resultFile
+            $childExitCode = $LASTEXITCODE
+            if ($childExitCode -ne 0) {
+                throw "$childSet native acceptance child exited $childExitCode."
+            }
+            if (-not (Test-Path -LiteralPath $resultFile -PathType Leaf)) {
+                throw "$childSet native acceptance child wrote no result file."
+            }
+            try {
+                $payload = Get-Content -LiteralPath $resultFile -Raw -Encoding UTF8 |
+                    ConvertFrom-Json -ErrorAction Stop
+            }
+            catch {
+                throw "$childSet native acceptance result is not valid JSON. $($_.Exception.Message)"
+            }
+            if ($payload.SchemaVersion -ne 1 -or $payload.CheckSet -ne $childSet) {
+                throw "$childSet native acceptance result has the wrong schema or check-set identity."
+            }
+            $expectedChildCount = if ($childSet -eq 'Core') { 46 } else { 12 }
+            $childRows = @($payload.Rows)
+            if ($childRows.Count -ne $expectedChildCount) {
+                throw (
+                    "$childSet native acceptance returned $($childRows.Count) rows; " +
+                    "expected exactly $expectedChildCount."
+                )
+            }
+            foreach ($childRow in $childRows) {
+                if (
+                    [string]::IsNullOrWhiteSpace([string]$childRow.Check) -or
+                    $childRow.Pass -isnot [bool]
+                ) {
+                    throw "$childSet native acceptance returned a malformed check row."
+                }
+            }
+            if (
+                [string]::IsNullOrWhiteSpace([string]$payload.ExcelVersion) -or
+                [string]::IsNullOrWhiteSpace([string]$payload.ExcelBuild)
+            ) {
+                throw "$childSet native acceptance returned no Excel version/build evidence."
+            }
+            $childPayloads[$childSet] = $payload
+        }
+
+        if (
+            $childPayloads['Core'].ExcelVersion -ne $childPayloads['Payday'].ExcelVersion -or
+            $childPayloads['Core'].ExcelBuild -ne $childPayloads['Payday'].ExcelBuild
+        ) {
+            throw 'Core and Payday children ran against different Excel versions or builds.'
+        }
+        $allRows = @($childPayloads['Core'].Rows) + @($childPayloads['Payday'].Rows)
+        $rowCount = $allRows.Count
+        if ($rowCount -ne 58) {
+            throw "Combined native acceptance count was $rowCount; expected exactly 58."
+        }
+        $failedChecks = Write-NativeCheckSummary `
+            -Rows $allRows `
+            -ExcelVersion ([string]$childPayloads['Core'].ExcelVersion) `
+            -ExcelBuild ([string]$childPayloads['Core'].ExcelBuild)
+        if ($failedChecks -eq 0) {
+            $parentExitCode = 0
+        }
+    }
+    catch {
+        [Console]::Error.WriteLine('HARNESS ERROR: ' + $_.Exception.Message)
+    }
+    finally {
+        if (
+            $parentDirectoryCreated -and
+            (Test-Path -LiteralPath $parentTemporaryDirectory)
+        ) {
+            if (Test-SafeTemporaryDirectory $parentTemporaryDirectory $systemTemporaryRoot) {
+                try {
+                    Remove-Item -LiteralPath $parentTemporaryDirectory -Recurse -Force
+                }
+                catch {
+                    [Console]::Error.WriteLine(
+                        'CLEANUP ERROR: could not remove the parent result directory. ' +
+                        $_.Exception.Message
+                    )
+                    $parentExitCode = 1
+                }
+            }
+            else {
+                [Console]::Error.WriteLine(
+                    "CLEANUP ERROR: refusing to remove unexpected path: " +
+                    $parentTemporaryDirectory
+                )
+                $parentExitCode = 1
+            }
+        }
+    }
+    exit $parentExitCode
+}
+
+if ([string]::IsNullOrWhiteSpace($ResultPath)) {
+    throw 'Core and Payday modes require the private ResultPath argument.'
+}
+$ResultPath = [IO.Path]::GetFullPath($ResultPath)
+$resultDirectory = [IO.Path]::GetDirectoryName($ResultPath)
+$expectedResultName = $CheckSet.ToLowerInvariant() + '-result.json'
+if (
+    -not (Test-SafeTemporaryDirectory $resultDirectory $systemTemporaryRoot) -or
+    -not [string]::Equals(
+        [IO.Path]::GetFileName($ResultPath),
+        $expectedResultName,
+        [StringComparison]::Ordinal
+    )
+) {
+    throw "Refusing to write an unexpected child result path: $ResultPath"
+}
+
 $temporaryDirectory = Join-Path $systemTemporaryRoot (
     'sir-alexander-fitzgerald-native-' + [guid]::NewGuid().ToString('D')
 )
@@ -273,7 +499,7 @@ Acme Pty Ltd,INV-001,30/06/2026,1100.00
     $mPaydayBadAmount = ConvertTo-MText $paydayBadAmountFixture
     $mPaydayNoProvenance = ConvertTo-MText $paydayNoProvenanceFixture
 
-    $checksM = @"
+    $coreChecksM = @"
 let
     // --- helpers -------------------------------------------------------
     s = (v) => if v = null then "(null)" else Text.From(v),
@@ -281,10 +507,6 @@ let
     chk = (name, expected, actual) =>
         [Check = name, Expected = s(expected), Actual = s(actual), Pass = (s(expected) = s(actual))],
     raises = (f) => (try f())[HasError],
-
-    // --- PaydaySuper_Report: fixed producer contract ------------------
-    ps = PaydaySuper_Report($mPayday),
-    psFormula = Table.SelectRows(ps, each [employee_id] = "'=FORMULA"),
 
     // --- Xero_TrialBalance: both layouts -------------------------------
     tbC    = Xero_TrialBalance($mCombined),
@@ -335,36 +557,6 @@ let
         chk("columns: 12 data rows", 12, Table.RowCount(tbX)),
         chk("parity: combined and columns layouts agree on all 12 rows", true,
             rowText(projC) = rowText(projX)),
-
-        // --- PaydaySuper_Report ----------------------------------------
-        chk("Payday Super: terminal NOTE is excluded from two data rows", 2, Table.RowCount(ps)),
-        chk("Payday Super: leading-zero and escaped formula IDs stay text", true,
-            Table.FirstValue(Table.SelectColumns(ps, {"employee_id"})) = "000123"
-                and Value.Is(Table.FirstValue(Table.SelectColumns(ps, {"employee_id"})), type text)
-                and Table.RowCount(psFormula) = 1),
-        chk("Payday Super: raw verdict, caveat and unassessable range survive", true,
-            Table.FirstValue(Table.SelectColumns(psFormula, {"verdict"})) = "UNKNOWN"
-                and Text.Contains(Table.FirstValue(Table.SelectColumns(psFormula, {"caveats"})), "calendar coverage")
-                and Table.FirstValue(Table.SelectColumns(psFormula, {"unassessable_between"})) = "LATE or ON_TIME"),
-        chk("Payday Super: producer amounts are numbers, not recalculated", true,
-            Value.Is(Table.FirstValue(Table.SelectColumns(ps, {"sg_amount"})), type number)
-                and near(Table.FirstValue(Table.SelectColumns(ps, {"sg_amount"})), 780.00)),
-        chk("Payday Super: blank producer amount stays null", "(null)",
-            Table.FirstValue(Table.SelectColumns(psFormula, {"final_shortfall"}))),
-        chk("Payday Super: terminal NOTE provenance is table metadata", true,
-            Text.Contains(Value.Metadata(ps)[PaydaySuperProvenance], "payday-super-checker")),
-        chk("Payday Super: extra producer columns are tolerated", 2,
-            Table.RowCount(PaydaySuper_Report($mPaydayExtra))),
-        chk("Payday Super: renamed or missing required header raises", true,
-            raises(() => Table.RowCount(PaydaySuper_Report($mPaydayMissingHeader)))),
-        chk("Payday Super: duplicate header raises", true,
-            raises(() => Table.RowCount(PaydaySuper_Report($mPaydayDuplicateHeader)))),
-        chk("Payday Super: malformed contribution row raises", true,
-            raises(() => Table.RowCount(PaydaySuper_Report($mPaydayMalformed)))),
-        chk("Payday Super: invalid producer amount raises", true,
-            raises(() => Table.RowCount(PaydaySuper_Report($mPaydayBadAmount)))),
-        chk("Payday Super: no terminal NOTE provenance raises", true,
-            raises(() => Table.RowCount(PaydaySuper_Report($mPaydayNoProvenance))),
 
         // --- Fx_AUFinancialYear ----------------------------------------
         chk("FY: 30 Jun 2026 -> FY2026", "FY2026", Fx_AUFinancialYear(#date(2026, 6, 30))[Label]),
@@ -439,6 +631,116 @@ in
     Result
 "@
 
+    # Each Payday query reads one fabricated file only. Combining all seven
+    # file sources in one M expression triggers Excel's privacy/firewall host
+    # bug (a spurious missing Source step) even though every predicate passes
+    # independently. Separate query materialisations preserve all 12 checks.
+    $paydayBaseChecksM = @"
+let
+    s = (v) => if v = null then "(null)" else Text.From(v),
+    near = (a, b) => a <> null and b <> null and Number.Abs(a - b) < 0.005,
+    chk = (name, expected, actual) =>
+        [Check = name, Expected = s(expected), Actual = s(actual), Pass = (s(expected) = s(actual))],
+    ps = PaydaySuper_Report($mPayday),
+    psFormula = Table.SelectRows(ps, each [employee_id] = "'=FORMULA"),
+    checks = {
+        chk("Payday Super: terminal NOTE is excluded from two data rows", 2, Table.RowCount(ps)),
+        chk("Payday Super: leading-zero and escaped formula IDs stay text", true,
+            Table.FirstValue(Table.SelectColumns(ps, {"employee_id"})) = "000123"
+                and Value.Is(Table.FirstValue(Table.SelectColumns(ps, {"employee_id"})), type text)
+                and Table.RowCount(psFormula) = 1),
+        chk("Payday Super: raw verdict, caveat and unassessable range survive", true,
+            Table.FirstValue(Table.SelectColumns(psFormula, {"verdict"})) = "UNKNOWN"
+                and Text.Contains(Table.FirstValue(Table.SelectColumns(psFormula, {"caveats"})), "calendar coverage")
+                and Table.FirstValue(Table.SelectColumns(psFormula, {"unassessable_between"})) = "LATE or ON_TIME"),
+        chk("Payday Super: producer amounts are numbers, not recalculated", true,
+            Value.Is(Table.FirstValue(Table.SelectColumns(ps, {"sg_amount"})), type number)
+                and near(Table.FirstValue(Table.SelectColumns(ps, {"sg_amount"})), 780.00)),
+        chk("Payday Super: blank producer amount stays null", "(null)",
+            Table.FirstValue(Table.SelectColumns(psFormula, {"final_shortfall"}))),
+        chk("Payday Super: terminal NOTE provenance is table metadata", true,
+            Text.Contains(Value.Metadata(ps)[PaydaySuperProvenance], "payday-super-checker"))
+    },
+    Result = Table.FromRecords(
+        checks,
+        type table [Check = text, Expected = text, Actual = text, Pass = logical]
+    )
+in
+    Result
+"@
+
+    $paydayExtraCheckM = @"
+let
+    actual = Table.RowCount(PaydaySuper_Report($mPaydayExtra)),
+    Result = #table(
+        type table [Check = text, Expected = text, Actual = text, Pass = logical],
+        {{"Payday Super: extra producer columns are tolerated", "2", Text.From(actual), actual = 2}}
+    )
+in
+    Result
+"@
+
+    function New-PaydayExpectedErrorCheckM {
+        param(
+            [Parameter(Mandatory = $true)]
+            [string]$Name,
+            [Parameter(Mandatory = $true)]
+            [string]$MExpression
+        )
+
+        $mName = ConvertTo-MText $Name
+        return @"
+let
+    actual = (try $MExpression)[HasError],
+    Result = #table(
+        type table [Check = text, Expected = text, Actual = text, Pass = logical],
+        {{$mName, "true", Text.From(actual), actual = true}}
+    )
+in
+    Result
+"@
+    }
+
+    $paydayCheckQueries = @(
+        [pscustomobject]@{ Name = 'ZZ_PaydayBaseChecks'; ExpectedRows = 6; Source = $paydayBaseChecksM },
+        [pscustomobject]@{ Name = 'ZZ_PaydayExtraCheck'; ExpectedRows = 1; Source = $paydayExtraCheckM },
+        [pscustomobject]@{
+            Name = 'ZZ_PaydayMissingHeaderCheck'
+            ExpectedRows = 1
+            Source = New-PaydayExpectedErrorCheckM `
+                -Name 'Payday Super: renamed or missing required header raises' `
+                -MExpression "Table.RowCount(PaydaySuper_Report($mPaydayMissingHeader))"
+        },
+        [pscustomobject]@{
+            Name = 'ZZ_PaydayDuplicateHeaderCheck'
+            ExpectedRows = 1
+            Source = New-PaydayExpectedErrorCheckM `
+                -Name 'Payday Super: duplicate header raises' `
+                -MExpression "Table.RowCount(PaydaySuper_Report($mPaydayDuplicateHeader))"
+        },
+        [pscustomobject]@{
+            Name = 'ZZ_PaydayMalformedCheck'
+            ExpectedRows = 1
+            Source = New-PaydayExpectedErrorCheckM `
+                -Name 'Payday Super: malformed contribution row raises' `
+                -MExpression "Table.RowCount(PaydaySuper_Report($mPaydayMalformed))"
+        },
+        [pscustomobject]@{
+            Name = 'ZZ_PaydayBadAmountCheck'
+            ExpectedRows = 1
+            Source = New-PaydayExpectedErrorCheckM `
+                -Name 'Payday Super: invalid producer amount raises' `
+                -MExpression "List.Sum(PaydaySuper_Report($mPaydayBadAmount)[sg_amount])"
+        },
+        [pscustomobject]@{
+            Name = 'ZZ_PaydayNoProvenanceCheck'
+            ExpectedRows = 1
+            Source = New-PaydayExpectedErrorCheckM `
+                -Name 'Payday Super: no terminal NOTE provenance raises' `
+                -MExpression "Value.Metadata(PaydaySuper_Report($mPaydayNoProvenance))[PaydaySuperProvenance]"
+        }
+    )
+
     try {
         $excel = New-Object -ComObject Excel.Application
     }
@@ -465,10 +767,20 @@ in
     # The $Workbook$ provider is more stable when the workbook has a path.
     $workbook.SaveAs($temporaryWorkbook, 51)
     $worksheets = $workbook.Worksheets
-    $worksheet = $worksheets.Item(1)
     $queries = $workbook.Queries
 
-    foreach ($file in $powerQueryFiles) {
+    $selectedPowerQueryFiles = @(
+        if ($CheckSet -eq 'Core') {
+            $powerQueryFiles
+        }
+        else {
+            $powerQueryFiles | Where-Object { $_.Name -eq 'PaydaySuper.Report.pq' }
+        }
+    )
+    if ($selectedPowerQueryFiles.Count -eq 0) {
+        throw "$CheckSet child selected no Power Query source files."
+    }
+    foreach ($file in $selectedPowerQueryFiles) {
         # Queries.Add rejects dots in names, so Fx.ABNIsValid becomes
         # Fx_ABNIsValid. Only the query name changes; the M source is unaltered.
         $queryName = [IO.Path]::GetFileNameWithoutExtension($file.Name) -replace '\.', '_'
@@ -476,92 +788,118 @@ in
         $currentQuery = $queries.Add($queryName, $querySource)
         [void]$createdQueries.Add($currentQuery)
         $currentQuery = $null
-        Write-Host "loaded $($file.Name) as query: $queryName"
     }
 
-    $currentQuery = $queries.Add('ZZ_Checks', $checksM)
-    [void]$createdQueries.Add($currentQuery)
-    $currentQuery = $null
-
-    $connectionString = (
-        'OLEDB;Provider=Microsoft.Mashup.OleDb.1;Data Source=$Workbook$;' +
-        'Location=ZZ_Checks;Extended Properties=""'
+    $querySpecifications = @(
+        if ($CheckSet -eq 'Core') {
+            [pscustomobject]@{
+                Name = 'ZZ_CoreChecks'
+                ExpectedRows = 46
+                Source = $coreChecksM
+            }
+        }
+        else {
+            $paydayCheckQueries
+        }
     )
-    $targetRange = $worksheet.Range('A1')
-    $listObjects = $worksheet.ListObjects
-    $listObject = $listObjects.Add(0, $connectionString, $null, 1, $targetRange)
-    $queryTable = $listObject.QueryTable
-    $queryTable.CommandType = 2
-    $queryTable.CommandText = @('SELECT * FROM [ZZ_Checks]')
-    $queryTable.BackgroundQuery = $false
+    $checkRows = @()
+    for ($queryIndex = 0; $queryIndex -lt $querySpecifications.Count; $queryIndex++) {
+        $querySpecification = $querySpecifications[$queryIndex]
+        $selectedQueryName = [string]$querySpecification.Name
+        $currentQuery = $queries.Add(
+            $selectedQueryName,
+            [string]$querySpecification.Source
+        )
+        [void]$createdQueries.Add($currentQuery)
+        $currentQuery = $null
 
-    try {
-        [void]$queryTable.Refresh($false)
-        $excel.CalculateUntilAsyncQueriesDone()
+        $worksheet = if ($queryIndex -eq 0) {
+            $worksheets.Item(1)
+        }
+        else {
+            $worksheets.Add()
+        }
+        $connectionString = (
+            'OLEDB;Provider=Microsoft.Mashup.OleDb.1;Data Source=$Workbook$;' +
+            "Location=$selectedQueryName;Extended Properties=`"`""
+        )
+        $targetRange = $worksheet.Range('A1')
+        $listObjects = $worksheet.ListObjects
+        $listObject = $listObjects.Add(0, $connectionString, $null, 1, $targetRange)
+        $queryTable = $listObject.QueryTable
+        $queryTable.CommandType = 2
+        $queryTable.CommandText = @("SELECT * FROM [$selectedQueryName]")
+        $queryTable.BackgroundQuery = $false
+
+        try {
+            [void]$queryTable.Refresh($false)
+            $excel.CalculateUntilAsyncQueriesDone()
+        }
+        catch {
+            throw (
+                "$selectedQueryName Power Query refresh failed. Desktop Excel must provide " +
+                'Microsoft.Mashup.OleDb.1. ' + $_.Exception.Message
+            )
+        }
+
+        $dataBodyRange = $listObject.DataBodyRange
+        if ($null -eq $dataBodyRange) {
+            throw "$selectedQueryName returned no rows; the M did not evaluate."
+        }
+        $values = $dataBodyRange.Value2
+        if ($values -isnot [array] -or $values.Rank -ne 2) {
+            throw "$selectedQueryName returned an unexpected result shape."
+        }
+        $rowCount = $values.GetUpperBound(0) - $values.GetLowerBound(0) + 1
+        $columnCount = $values.GetUpperBound(1) - $values.GetLowerBound(1) + 1
+        if ($rowCount -ne [int]$querySpecification.ExpectedRows) {
+            throw (
+                "$selectedQueryName returned $rowCount rows; expected exactly " +
+                "$($querySpecification.ExpectedRows)."
+            )
+        }
+        if ($columnCount -ne 4) {
+            throw "$selectedQueryName returned $columnCount columns; expected exactly 4."
+        }
+        $checkRows += @(ConvertFrom-NativeCheckValues -Values $values)
+
+        # The workbook owns the materialised table. Release this iteration's
+        # automation references before creating the next independent query.
+        Release-ComReference $dataBodyRange 'DataBodyRange'
+        $dataBodyRange = $null
+        Release-ComReference $queryTable 'QueryTable'
+        $queryTable = $null
+        Release-ComReference $listObject 'ListObject'
+        $listObject = $null
+        Release-ComReference $listObjects 'ListObjects collection'
+        $listObjects = $null
+        Release-ComReference $targetRange 'target Range'
+        $targetRange = $null
+        Release-ComReference $worksheet 'Worksheet'
+        $worksheet = $null
     }
-    catch {
+    $expectedRowCount = if ($CheckSet -eq 'Core') { 46 } else { 12 }
+    if ($checkRows.Count -ne $expectedRowCount) {
         throw (
-            'Power Query refresh failed. Desktop Excel must provide ' +
-            'Microsoft.Mashup.OleDb.1. ' + $_.Exception.Message
+            "$CheckSet child aggregated $($checkRows.Count) rows; " +
+            "expected exactly $expectedRowCount."
         )
     }
-
-    $dataBodyRange = $listObject.DataBodyRange
-    if ($null -eq $dataBodyRange) {
-        throw 'ZZ_Checks returned no rows; the M did not evaluate.'
+    $payload = [ordered]@{
+        SchemaVersion = 1
+        CheckSet = $CheckSet
+        ExcelVersion = $excelVersion
+        ExcelBuild = $excelBuild
+        Rows = $checkRows
     }
+    $json = $payload | ConvertTo-Json -Depth 5
+    $utf8WithoutBom = New-Object System.Text.UTF8Encoding($false)
+    [IO.File]::WriteAllText($ResultPath, $json, $utf8WithoutBom)
 
-    $values = $dataBodyRange.Value2
-    if ($values -isnot [array] -or $values.Rank -ne 2) {
-        throw 'ZZ_Checks returned an unexpected result shape.'
-    }
-
-    $rowLower = $values.GetLowerBound(0)
-    $rowUpper = $values.GetUpperBound(0)
-    $columnLower = $values.GetLowerBound(1)
-    $columnUpper = $values.GetUpperBound(1)
-    $rowCount = $rowUpper - $rowLower + 1
-    $columnCount = $columnUpper - $columnLower + 1
-
-    if ($rowCount -ne 58) {
-        throw "ZZ_Checks returned $rowCount rows; expected exactly 58."
-    }
-    if ($columnCount -ne 4) {
-        throw "ZZ_Checks returned $columnCount columns; expected exactly 4."
-    }
-
-    Write-Host ''
-    Write-Host (
-        'Excel {0} build {1}; locale {2}' -f
-            $excelVersion,
-            $excelBuild,
-            (Get-Culture).Name
-    )
-    Write-Host ('-' * 78)
-
-    $failedChecks = 0
-    for ($row = $rowLower; $row -le $rowUpper; $row++) {
-        $check = [string]$values[$row, $columnLower]
-        $expected = [string]$values[$row, ($columnLower + 1)]
-        $actual = [string]$values[$row, ($columnLower + 2)]
-        $passValue = $values[$row, ($columnLower + 3)]
-        $passed = ($passValue -eq $true) -or ([string]$passValue -eq 'TRUE')
-
-        if (-not $passed) {
-            $failedChecks++
-        }
-
-        Write-Host ('{0}  {1}' -f $(if ($passed) { 'PASS' } else { 'FAIL' }), $check)
-        if (-not $passed) {
-            Write-Host ('        expected [{0}]  actual [{1}]' -f $expected, $actual)
-        }
-    }
-
-    Write-Host ('-' * 78)
-    Write-Host ('{0} checks, {1} failed' -f $rowCount, $failedChecks)
-    if ($failedChecks -eq 0) {
-        $exitCode = 0
-    }
+    # A child succeeded when it produced a complete, validated result set.
+    # Failed predicates remain structured rows for the parent to print and
+    # decide; a non-zero child exit is reserved for a harness/cleanup failure.
+    $exitCode = 0
 }
 catch {
     [Console]::Error.WriteLine('HARNESS ERROR: ' + $_.Exception.Message)
