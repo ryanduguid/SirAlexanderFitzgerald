@@ -100,7 +100,12 @@ def _parse_payday_super_report(path):
         if len(values) != len(headers):
             raise PaydaySuperReportError(f"malformed row {index}")
         record = dict(zip(headers, values))
-        if record["employee_id"] == "NOTE":
+        is_terminal_note = record["employee_id"] == "NOTE" and all(
+            not record[field]
+            for field in PAYDAY_SUPER_HEADERS
+            if field not in {"employee_id", "notes"}
+        )
+        if is_terminal_note:
             if index != len(rows) or provenance is not None:
                 raise PaydaySuperReportError("NOTE row must be terminal and unique")
             provenance = record["notes"]
@@ -199,8 +204,14 @@ class NativeExcelAcceptanceSafetyTests(unittest.TestCase):
         self.assertIn("ZZ_CoreChecks", source)
         self.assertIn("ZZ_PaydayBaseChecks", source)
         self.assertIn("ZZ_PaydayExtraCheck", source)
+        self.assertIn("ZZ_PaydayEmployeeNoteCheck", source)
+        self.assertIn("ZZ_PaydayNoProvenanceMaterialisationCheck", source)
+        self.assertIn("ZZ_PaydayDuplicateProvenanceCheck", source)
+        self.assertIn("ZZ_PaydayNonTerminalProvenanceCheck", source)
+        self.assertIn("ZZ_PaydayEmptyProvenanceCheck", source)
+        self.assertIn("ZZ_PaydayShortRowCheck", source)
         self.assertIn("$paydayCheckQueries", source)
-        self.assertIn("ExpectedRows = 6", source)
+        self.assertIn("ExpectedRows = 7", source)
         self.assertIn("$querySpecifications = @(\n        if ($CheckSet -eq 'Core')", source)
         self.assertIn(
             "List.Sum(PaydaySuper_Report($mPaydayBadAmount)[sg_amount])",
@@ -212,11 +223,19 @@ class NativeExcelAcceptanceSafetyTests(unittest.TestCase):
             source,
         )
         self.assertIn(
-            "$expectedChildCount = if ($childSet -eq 'Core') { 46 } else { 12 }",
+            "Table.RowCount(PaydaySuper_Report($mPaydayNoProvenance))",
+            source,
+        )
+        self.assertIn(
+            "Table.RowCount(PaydaySuper_Report($mPaydayShortRow))",
+            source,
+        )
+        self.assertIn(
+            "$expectedChildCount = if ($childSet -eq 'Core') { 46 } else { 19 }",
             source,
         )
         self.assertIn("if ($childRows.Count -ne $expectedChildCount)", source)
-        self.assertIn("if ($rowCount -ne 58)", source)
+        self.assertIn("if ($rowCount -ne 65)", source)
         self.assertIn("[ValidateSet('All', 'Core', 'Payday')]", source)
         self.assertIn("-CheckSet $childSet", source)
         self.assertIn("-ResultPath $resultFile", source)
@@ -1009,10 +1028,29 @@ class PaydaySuperReportContractTests(unittest.TestCase):
         self.assertIsInstance(records[1]["employee_id"], str)
         self.assertEqual(records[0]["verdict"], "LATE")
         self.assertEqual(records[1]["verdict"], "UNKNOWN")
+        self.assertEqual(records[0]["notes"], 'Fabricated, "late" contribution')
         self.assertEqual(records[1]["unassessable_between"], "LATE or ON_TIME")
         self.assertIn("calendar coverage", records[1]["caveats"])
         self.assertIn("payday-super-checker", provenance)
         self.assertNotIn("NOTE", [record["employee_id"] for record in records])
+
+    def test_literal_note_employee_identifier_remains_a_contribution(self):
+        with PAYDAY_SUPER_FIXTURE.open(newline="", encoding="utf-8-sig") as stream:
+            source_rows = list(csv.reader(stream))
+        changed = [list(row) for row in source_rows]
+        employee_id = source_rows[0].index("employee_id")
+        changed[1][employee_id] = "NOTE"
+
+        with tempfile.TemporaryDirectory() as temporary_name:
+            report = Path(temporary_name) / "literal-note-employee.csv"
+            with report.open("w", newline="", encoding="utf-8-sig") as stream:
+                csv.writer(stream).writerows(changed)
+
+            records, provenance = _parse_payday_super_report(report)
+
+        self.assertEqual(len(records), 2)
+        self.assertEqual(records[0]["employee_id"], "NOTE")
+        self.assertIn("payday-super-checker", provenance)
 
     def test_amounts_are_typed_or_null_without_recalculation(self):
         records, _ = _parse_payday_super_report(PAYDAY_SUPER_FIXTURE)
@@ -1101,8 +1139,13 @@ class PaydaySuperReportContractTests(unittest.TestCase):
             r'Error\.Record\(\s*"PaydaySuper\.Report",\s*"Missing terminal NOTE provenance"',
             r'Value\.ReplaceMetadata\(',
             r'PaydaySuperProvenance = Provenance',
+            r'fileBinary\s*=\s*Binary\.Buffer\(File\.Contents\(FilePath\)\)',
             r'Table\.SelectColumns\(HeadersChecked, RequiredHeaders, MissingField\.Error\)',
             r'Table\.Buffer\(AmountTyped\)',
+            r'CsvRecordWidths',
+            r'RecordWidthsChecked',
+            r'IsTerminalNoteCandidate',
+            r'ValidatedResult\s*=\s*if Text\.Length\(ProvenanceChecked\) >= 0 then Result',
         ):
             with self.subTest(required=required):
                 self.assertRegex(source, required)
@@ -1114,9 +1157,11 @@ class PaydaySuperReportContractTests(unittest.TestCase):
         )
         for required in (
             "fabricated Payday Super report",
-            "terminal `NOTE` row",
+            "`employee_id = NOTE`",
             "`PaydaySuperProvenance`",
             "raw `verdict`",
+            "literal employee identifier is `NOTE` remains data",
+            "present empty trailing field is valid",
         ):
             with self.subTest(required=required):
                 self.assertIn(required, readme)

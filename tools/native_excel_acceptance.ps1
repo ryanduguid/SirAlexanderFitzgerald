@@ -4,10 +4,10 @@
 Runs the repository's Power Query acceptance checks in desktop Excel.
 
 .DESCRIPTION
-Evaluates 58 checks in Excel's real Power Query engine. The default All mode
-isolates the 46 core checks and 12 Payday Super checks in fresh child
-PowerShell and Excel processes. The Payday child materialises its seven
-fabricated file sources through independent single-source queries so Excel's
+Evaluates 65 checks in Excel's real Power Query engine. The default All mode
+isolates the 46 core checks and 19 Payday Super checks in fresh child
+PowerShell and Excel processes. The Payday child uses 13 independent
+single-source queries across 12 fabricated files so Excel's
 cross-source privacy/firewall composition state cannot mask adapter behaviour.
 The checks cover both fabricated Xero trial-balance layouts, financial-year
 boundaries, ABN validation, header promotion, and adverse and lazy-evaluation
@@ -26,7 +26,7 @@ repository containing this script.
 
 .PARAMETER CheckSet
 Internal isolation mode. The default All mode launches fresh child PowerShell
-processes for the 46 core checks and 12 Payday Super checks. Core and Payday
+processes for the 46 core checks and 19 Payday Super checks. Core and Payday
 are child modes so Excel's Mashup host cannot carry file-source state from one
 group into the other.
 
@@ -276,7 +276,7 @@ if ($CheckSet -eq 'All') {
             if ($payload.SchemaVersion -ne 1 -or $payload.CheckSet -ne $childSet) {
                 throw "$childSet native acceptance result has the wrong schema or check-set identity."
             }
-            $expectedChildCount = if ($childSet -eq 'Core') { 46 } else { 12 }
+            $expectedChildCount = if ($childSet -eq 'Core') { 46 } else { 19 }
             $childRows = @($payload.Rows)
             if ($childRows.Count -ne $expectedChildCount) {
                 throw (
@@ -309,8 +309,8 @@ if ($CheckSet -eq 'All') {
         }
         $allRows = @($childPayloads['Core'].Rows) + @($childPayloads['Payday'].Rows)
         $rowCount = $allRows.Count
-        if ($rowCount -ne 58) {
-            throw "Combined native acceptance count was $rowCount; expected exactly 58."
+        if ($rowCount -ne 65) {
+            throw "Combined native acceptance count was $rowCount; expected exactly 65."
         }
         $failedChecks = Write-NativeCheckSummary `
             -Rows $allRows `
@@ -388,6 +388,11 @@ $paydayDuplicateHeaderFixture = Join-Path $temporaryDirectory 'payday-duplicate-
 $paydayMalformedFixture = Join-Path $temporaryDirectory 'payday-malformed.csv'
 $paydayBadAmountFixture = Join-Path $temporaryDirectory 'payday-bad-amount.csv'
 $paydayNoProvenanceFixture = Join-Path $temporaryDirectory 'payday-no-provenance.csv'
+$paydayEmployeeNoteFixture = Join-Path $temporaryDirectory 'payday-employee-note.csv'
+$paydayDuplicateProvenanceFixture = Join-Path $temporaryDirectory 'payday-duplicate-provenance.csv'
+$paydayNonTerminalProvenanceFixture = Join-Path $temporaryDirectory 'payday-non-terminal-provenance.csv'
+$paydayEmptyProvenanceFixture = Join-Path $temporaryDirectory 'payday-empty-provenance.csv'
+$paydayShortRowFixture = Join-Path $temporaryDirectory 'payday-short-row.csv'
 
 $temporaryDirectoryCreated = $false
 $exitCode = 1
@@ -485,6 +490,35 @@ Acme Pty Ltd,INV-001,30/06/2026,1100.00
     $paydayLines[0..($paydayLines.Count - 2)] |
         Set-Content -LiteralPath $paydayNoProvenanceFixture -Encoding UTF8
 
+    $paydayEmployeeNoteLines = @($paydayLines)
+    $paydayEmployeeNoteLines[1] = $paydayEmployeeNoteLines[1] -replace ',000123,', ',NOTE,'
+    $paydayEmployeeNoteLines |
+        Set-Content -LiteralPath $paydayEmployeeNoteFixture -Encoding UTF8
+
+    @($paydayLines + $paydayLines[$paydayLines.Count - 1]) |
+        Set-Content -LiteralPath $paydayDuplicateProvenanceFixture -Encoding UTF8
+
+    @(
+        $paydayLines[0]
+        $paydayLines[$paydayLines.Count - 1]
+        $paydayLines[1..($paydayLines.Count - 2)]
+    ) | Set-Content -LiteralPath $paydayNonTerminalProvenanceFixture -Encoding UTF8
+
+    $paydayEmptyProvenanceLines = @($paydayLines)
+    $paydayEmptyProvenanceFields = @($paydayEmptyProvenanceLines[-1].Split(','))
+    if ($paydayEmptyProvenanceFields.Count -ne 18) {
+        throw 'The fabricated terminal NOTE fixture no longer has exactly 18 fields.'
+    }
+    $paydayEmptyProvenanceFields[16] = ''
+    $paydayEmptyProvenanceLines[-1] = [string]::Join(',', $paydayEmptyProvenanceFields)
+    $paydayEmptyProvenanceLines |
+        Set-Content -LiteralPath $paydayEmptyProvenanceFixture -Encoding UTF8
+
+    $paydayShortRowLines = @($paydayLines)
+    $paydayShortRowLines[2] = $paydayShortRowLines[2] -replace ',LATE or ON_TIME$', ''
+    $paydayShortRowLines |
+        Set-Content -LiteralPath $paydayShortRowFixture -Encoding UTF8
+
     $mCombined = ConvertTo-MText $combinedFixture
     $mColumns = ConvertTo-MText $columnsFixture
     $mPeriodOnly = ConvertTo-MText $periodOnlyFixture
@@ -498,6 +532,11 @@ Acme Pty Ltd,INV-001,30/06/2026,1100.00
     $mPaydayMalformed = ConvertTo-MText $paydayMalformedFixture
     $mPaydayBadAmount = ConvertTo-MText $paydayBadAmountFixture
     $mPaydayNoProvenance = ConvertTo-MText $paydayNoProvenanceFixture
+    $mPaydayEmployeeNote = ConvertTo-MText $paydayEmployeeNoteFixture
+    $mPaydayDuplicateProvenance = ConvertTo-MText $paydayDuplicateProvenanceFixture
+    $mPaydayNonTerminalProvenance = ConvertTo-MText $paydayNonTerminalProvenanceFixture
+    $mPaydayEmptyProvenance = ConvertTo-MText $paydayEmptyProvenanceFixture
+    $mPaydayShortRow = ConvertTo-MText $paydayShortRowFixture
 
     $coreChecksM = @"
 let
@@ -631,10 +670,10 @@ in
     Result
 "@
 
-    # Each Payday query reads one fabricated file only. Combining all seven
-    # file sources in one M expression triggers Excel's privacy/firewall host
+    # Each Payday query reads one fabricated file only. Combining the file
+    # sources in one M expression triggers Excel's privacy/firewall host
     # bug (a spurious missing Source step) even though every predicate passes
-    # independently. Separate query materialisations preserve all 12 checks.
+    # independently. Separate query materialisations preserve all 19 checks.
     $paydayBaseChecksM = @"
 let
     s = (v) => if v = null then "(null)" else Text.From(v),
@@ -642,6 +681,7 @@ let
     chk = (name, expected, actual) =>
         [Check = name, Expected = s(expected), Actual = s(actual), Pass = (s(expected) = s(actual))],
     ps = PaydaySuper_Report($mPayday),
+    psFirst = Table.SelectRows(ps, each [row] = "1"),
     psFormula = Table.SelectRows(ps, each [employee_id] = "'=FORMULA"),
     checks = {
         chk("Payday Super: terminal NOTE is excluded from two data rows", 2, Table.RowCount(ps)),
@@ -659,7 +699,10 @@ let
         chk("Payday Super: blank producer amount stays null", "(null)",
             Table.FirstValue(Table.SelectColumns(psFormula, {"final_shortfall"}))),
         chk("Payday Super: terminal NOTE provenance is table metadata", true,
-            Text.Contains(Value.Metadata(ps)[PaydaySuperProvenance], "payday-super-checker"))
+            Text.Contains(Value.Metadata(ps)[PaydaySuperProvenance], "payday-super-checker")),
+        chk("Payday Super: a present empty trailing field remains valid", true,
+            let trailing = Table.FirstValue(Table.SelectColumns(psFirst, {"unassessable_between"}))
+            in trailing = null or trailing = "")
     },
     Result = Table.FromRecords(
         checks,
@@ -702,8 +745,26 @@ in
     }
 
     $paydayCheckQueries = @(
-        [pscustomobject]@{ Name = 'ZZ_PaydayBaseChecks'; ExpectedRows = 6; Source = $paydayBaseChecksM },
+        [pscustomobject]@{ Name = 'ZZ_PaydayBaseChecks'; ExpectedRows = 7; Source = $paydayBaseChecksM },
         [pscustomobject]@{ Name = 'ZZ_PaydayExtraCheck'; ExpectedRows = 1; Source = $paydayExtraCheckM },
+        [pscustomobject]@{
+            Name = 'ZZ_PaydayEmployeeNoteCheck'
+            ExpectedRows = 1
+            Source = @"
+let
+    adapted = PaydaySuper_Report($mPaydayEmployeeNote),
+    literalNote = Table.SelectRows(adapted, each [employee_id] = "NOTE"),
+    actual = Table.RowCount(adapted) = 2
+        and Table.RowCount(literalNote) = 1
+        and literalNote{0}[row] = "1",
+    Result = #table(
+        type table [Check = text, Expected = text, Actual = text, Pass = logical],
+        {{"Payday Super: literal NOTE employee identifier remains data", "true", Text.From(actual), actual = true}}
+    )
+in
+    Result
+"@
+        },
         [pscustomobject]@{
             Name = 'ZZ_PaydayMissingHeaderCheck'
             ExpectedRows = 1
@@ -738,6 +799,41 @@ in
             Source = New-PaydayExpectedErrorCheckM `
                 -Name 'Payday Super: no terminal NOTE provenance raises' `
                 -MExpression "Value.Metadata(PaydaySuper_Report($mPaydayNoProvenance))[PaydaySuperProvenance]"
+        },
+        [pscustomobject]@{
+            Name = 'ZZ_PaydayNoProvenanceMaterialisationCheck'
+            ExpectedRows = 1
+            Source = New-PaydayExpectedErrorCheckM `
+                -Name 'Payday Super: ordinary table use rejects absent provenance' `
+                -MExpression "Table.RowCount(PaydaySuper_Report($mPaydayNoProvenance))"
+        },
+        [pscustomobject]@{
+            Name = 'ZZ_PaydayDuplicateProvenanceCheck'
+            ExpectedRows = 1
+            Source = New-PaydayExpectedErrorCheckM `
+                -Name 'Payday Super: ordinary table use rejects duplicate provenance' `
+                -MExpression "Table.RowCount(PaydaySuper_Report($mPaydayDuplicateProvenance))"
+        },
+        [pscustomobject]@{
+            Name = 'ZZ_PaydayNonTerminalProvenanceCheck'
+            ExpectedRows = 1
+            Source = New-PaydayExpectedErrorCheckM `
+                -Name 'Payday Super: ordinary table use rejects non-terminal provenance' `
+                -MExpression "Table.RowCount(PaydaySuper_Report($mPaydayNonTerminalProvenance))"
+        },
+        [pscustomobject]@{
+            Name = 'ZZ_PaydayEmptyProvenanceCheck'
+            ExpectedRows = 1
+            Source = New-PaydayExpectedErrorCheckM `
+                -Name 'Payday Super: ordinary table use rejects empty provenance' `
+                -MExpression "Table.RowCount(PaydaySuper_Report($mPaydayEmptyProvenance))"
+        },
+        [pscustomobject]@{
+            Name = 'ZZ_PaydayShortRowCheck'
+            ExpectedRows = 1
+            Source = New-PaydayExpectedErrorCheckM `
+                -Name 'Payday Super: a record missing its trailing field raises' `
+                -MExpression "Table.RowCount(PaydaySuper_Report($mPaydayShortRow))"
         }
     )
 
@@ -878,7 +974,7 @@ in
         Release-ComReference $worksheet 'Worksheet'
         $worksheet = $null
     }
-    $expectedRowCount = if ($CheckSet -eq 'Core') { 46 } else { 12 }
+    $expectedRowCount = if ($CheckSet -eq 'Core') { 46 } else { 19 }
     if ($checkRows.Count -ne $expectedRowCount) {
         throw (
             "$CheckSet child aggregated $($checkRows.Count) rows; " +
