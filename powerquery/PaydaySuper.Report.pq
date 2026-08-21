@@ -28,141 +28,108 @@ let
             "sgc_estimate_high"
         },
         TextHeaders = List.Difference(RequiredHeaders, AmountHeaders),
-        // Read one stable snapshot. The width scan and Csv.Document must see
+        // Read one stable snapshot. Width validation and Csv.Document must see
         // identical bytes even if the producer replaces the file mid-refresh.
         fileBinary = Binary.Buffer(File.Contents(FilePath)),
         CsvText = Text.TrimStart(
             Text.FromBinary(fileBinary, TextEncoding.Utf8),
             {Character.FromNumber(65279)}
         ),
-        CsvCharacters = Text.ToList(CsvText),
-        CarriageReturn = Character.FromNumber(13),
-        LineFeed = Character.FromNumber(10),
+        CharacterCount = Text.Length(CsvText),
         QuoteCharacter = Character.FromNumber(34),
-        // Csv.Document pads short records with nulls, so its Columns option
-        // cannot distinguish an absent final field from a present empty one.
-        // Count CSV fields with the same quote-after-delimiter semantics first;
-        // record separators inside quoted values do not end a record.
-        CsvWidthScan = List.Accumulate(
-            List.Positions(CsvCharacters),
-            [
-                InQuotes = false,
-                SkipEscapedQuote = false,
-                SkipLineFeed = false,
-                AtFieldStart = true,
-                FieldCount = 1,
-                Widths = {},
-                EndedWithRecordSeparator = false
-            ],
-            (state as record, position as number) as record =>
-                let
-                    character = CsvCharacters{position},
-                    nextCharacter = if position + 1 < List.Count(CsvCharacters) then
-                        CsvCharacters{position + 1}
-                        else null,
-                    activeState = if state[SkipLineFeed] and character <> LineFeed then
-                        Record.TransformFields(state, {{"SkipLineFeed", each false}})
-                        else state
-                in
-                    if state[SkipLineFeed] and character = LineFeed then
-                        Record.TransformFields(state, {{"SkipLineFeed", each false}})
-                    else if activeState[SkipEscapedQuote] then
-                        Record.TransformFields(
-                            activeState,
-                            {
-                                {"SkipEscapedQuote", each false},
-                                {"EndedWithRecordSeparator", each false}
-                            }
-                        )
-                    else if activeState[InQuotes] then
-                        if character = QuoteCharacter and nextCharacter = QuoteCharacter then
-                            Record.TransformFields(
-                                activeState,
-                                {
-                                    {"SkipEscapedQuote", each true},
-                                    {"EndedWithRecordSeparator", each false}
-                                }
-                            )
-                        else if character = QuoteCharacter then
-                            Record.TransformFields(
-                                activeState,
-                                {
-                                    {"InQuotes", each false},
-                                    {"EndedWithRecordSeparator", each false}
-                                }
-                            )
-                        else
-                            Record.TransformFields(
-                                activeState,
-                                {{"EndedWithRecordSeparator", each false}}
-                            )
-                    else if activeState[AtFieldStart] and character = QuoteCharacter then
-                        Record.TransformFields(
-                            activeState,
-                            {
-                                {"InQuotes", each true},
-                                {"AtFieldStart", each false},
-                                {"EndedWithRecordSeparator", each false}
-                            }
-                        )
-                    else if character = "," then
-                        Record.TransformFields(
-                            activeState,
-                            {
-                                {"AtFieldStart", each true},
-                                {"FieldCount", each _ + 1},
-                                {"EndedWithRecordSeparator", each false}
-                            }
-                        )
-                    else if character = CarriageReturn or character = LineFeed then
-                        Record.TransformFields(
-                            activeState,
-                            {
-                                {"SkipLineFeed", each character = CarriageReturn},
-                                {"AtFieldStart", each true},
-                                {"FieldCount", each 1},
-                                {"Widths", each _ & {activeState[FieldCount]}},
-                                {"EndedWithRecordSeparator", each true}
-                            }
-                        )
-                    else
-                        Record.TransformFields(
-                            activeState,
-                            {
-                                {"AtFieldStart", each false},
-                                {"EndedWithRecordSeparator", each false}
-                            }
-                        )
-        ),
-        CsvRecordWidths = if List.IsEmpty(CsvCharacters) then
+        // Frame complete records with the Mashup engine's CSV quote rules.
+        // This preserves embedded newlines and avoids a state chain whose
+        // evaluation depth grows with the file's character count.
+        CsvRecords = if CharacterCount = 0 then
             {}
-            else if CsvWidthScan[EndedWithRecordSeparator] then
-                CsvWidthScan[Widths]
-            else
-                CsvWidthScan[Widths] & {CsvWidthScan[FieldCount]},
-        HeaderWidth = if List.IsEmpty(CsvRecordWidths) then
+            else Lines.FromText(CsvText, QuoteStyle.Csv, false),
+        RecordTable = Table.AddIndexColumn(
+            Table.FromList(
+                CsvRecords,
+                Splitter.SplitByNothing(),
+                {"RecordText"},
+                null,
+                ExtraValues.Error
+            ),
+            "RecordNumber",
+            1,
+            1,
+            Int64.Type
+        ),
+        MeasureRecord = (recordText as text, recordNumber as number) as record =>
+            let
+                quoteCount = Text.Length(recordText) -
+                    Text.Length(Text.Replace(recordText, QuoteCharacter, "")),
+                quoteChecked = if Number.Mod(quoteCount, 2) = 0 then recordText else
+                    error Error.Record(
+                        "PaydaySuper.Report",
+                        "Malformed report row",
+                        "CSV record " & Text.From(recordNumber) &
+                            " ends inside an unterminated quoted field."
+                    ),
+                parsedAttempt = try Csv.Document(
+                    Text.ToBinary(quoteChecked, TextEncoding.Utf8),
+                    [
+                        Delimiter = ",",
+                        Encoding = 65001,
+                        QuoteStyle = QuoteStyle.Csv,
+                        ExtraValues = ExtraValues.Error
+                    ]
+                ),
+                parsed = if parsedAttempt[HasError] then
+                    error Error.Record(
+                        "PaydaySuper.Report",
+                        "Malformed report row",
+                        "CSV record " & Text.From(recordNumber) & " is not valid CSV."
+                    )
+                    else parsedAttempt[Value],
+                rowCount = Table.RowCount(parsed),
+                width = if rowCount = 1 then Table.ColumnCount(parsed) else
+                    error Error.Record(
+                        "PaydaySuper.Report",
+                        "Malformed report row",
+                        "CSV record " & Text.From(recordNumber) &
+                            " did not parse as exactly one record."
+                    )
+            in
+                [RecordNumber = recordNumber, Width = width],
+        HeaderRecord = if
+            CharacterCount = 0 or Table.IsEmpty(RecordTable)
+        then
             error Error.Record(
                 "PaydaySuper.Report",
                 "Missing required header",
                 "The report has no header row."
             )
-            else CsvRecordWidths{0},
-        MalformedRecordNumbers = List.Transform(
-            List.Select(
-                List.Positions(CsvRecordWidths),
-                each CsvRecordWidths{_} <> HeaderWidth
-            ),
-            each _ + 1
+            else RecordTable{0},
+        HeaderWidth = MeasureRecord(
+            HeaderRecord[RecordText],
+            HeaderRecord[RecordNumber]
+        )[Width],
+        MeasuredRecords = Table.AddColumn(
+            RecordTable,
+            "Width",
+            each MeasureRecord([RecordText], [RecordNumber])[Width],
+            Int64.Type
         ),
-        RecordWidthsChecked = if List.IsEmpty(MalformedRecordNumbers) then
-            HeaderWidth
-            else error Error.Record(
-                "PaydaySuper.Report",
-                "Malformed report row",
-                "Every CSV record must contain exactly " & Text.From(HeaderWidth) &
-                    " fields; malformed record(s): " &
-                    Text.Combine(List.Transform(MalformedRecordNumbers, Text.From), ", ") & "."
+        FirstMalformedRecord = Table.FirstN(
+            Table.SelectRows(
+                Table.Skip(MeasuredRecords, 1),
+                each [Width] <> HeaderWidth
             ),
+            1
+        ),
+        RecordWidthsChecked = if Table.IsEmpty(FirstMalformedRecord) then
+            HeaderWidth
+            else
+                let malformed = FirstMalformedRecord{0} in
+                    error Error.Record(
+                        "PaydaySuper.Report",
+                        "Malformed report row",
+                        "CSV record " & Text.From(malformed[RecordNumber]) & " contains " &
+                            Text.From(malformed[Width]) & " fields; expected exactly " &
+                            Text.From(HeaderWidth) & "."
+                    ),
         Shaped = Csv.Document(
             fileBinary,
             [
@@ -234,9 +201,23 @@ let
             )
             else Text.From(Provenance),
         DataRows = Table.SelectRows(Indexed, each not IsTerminalNoteCandidate(_)),
+        DataRowCount = Table.RowCount(DataRows),
+        ContributionRowCount = if DataRowCount = 0 then
+            error Error.Record(
+                "PaydaySuper.Report",
+                "Missing contribution rows",
+                "The producer report must contain at least one contribution row."
+            )
+            else DataRowCount,
+        DataPresent = if ContributionRowCount > 0 then DataRows else
+            error Error.Record(
+                "PaydaySuper.Report",
+                "Missing contribution rows",
+                "Contribution validation produced an impossible state."
+            ),
         MandatoryDataFields = {"row", "employee_id", "qe_day", "pathway", "verdict"},
         MalformedRows = Table.SelectRows(
-            DataRows,
+            DataPresent,
             each
                 let current = _ in
                     List.AnyTrue(List.Transform(
@@ -246,7 +227,7 @@ let
                                 value = null or Text.Trim(Text.From(value)) = ""
                     ))
         ),
-        DataChecked = if Table.RowCount(MalformedRows) = 0 then DataRows else
+        DataChecked = if Table.RowCount(MalformedRows) = 0 then DataPresent else
             error Error.Record(
                 "PaydaySuper.Report",
                 "Malformed report row",
@@ -288,7 +269,9 @@ let
         // Metadata record fields are lazy in M. Make ordinary table use depend
         // on the provenance text so absent or malformed provenance cannot be
         // observed only when a caller happens to inspect Value.Metadata.
-        ValidatedResult = if Text.Length(ProvenanceChecked) >= 0 then Result else
+        ValidatedResult = if
+            Text.Length(ProvenanceChecked) >= 0 and ContributionRowCount > 0
+        then Result else
             error Error.Record(
                 "PaydaySuper.Report",
                 "Missing terminal NOTE provenance",

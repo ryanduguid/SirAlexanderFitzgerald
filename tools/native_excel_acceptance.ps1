@@ -4,14 +4,15 @@
 Runs the repository's Power Query acceptance checks in desktop Excel.
 
 .DESCRIPTION
-Evaluates 65 checks in Excel's real Power Query engine. The default All mode
-isolates the 46 core checks and 19 Payday Super checks in fresh child
-PowerShell and Excel processes. The Payday child uses 13 independent
-single-source queries across 12 fabricated files so Excel's
+Evaluates 72 checks in Excel's real Power Query engine. The default All mode
+isolates the 46 core checks and 26 Payday Super checks in fresh child
+PowerShell and Excel processes. The Payday child uses 20 independent
+single-source queries across 19 fabricated files so Excel's
 cross-source privacy/firewall composition state cannot mask adapter behaviour.
 The checks cover both fabricated Xero trial-balance layouts, financial-year
 boundaries, ABN validation, header promotion, and adverse and lazy-evaluation
-branches.
+branches. Payday scaling checks materialise 500, 5,000 and 10,000 contribution
+rows and report their measured refresh times.
 
 This runner requires Windows, Windows PowerShell 5.1 or newer, desktop
 Microsoft Excel, Power Query, and the Microsoft.Mashup.OleDb.1 provider. It
@@ -26,7 +27,7 @@ repository containing this script.
 
 .PARAMETER CheckSet
 Internal isolation mode. The default All mode launches fresh child PowerShell
-processes for the 46 core checks and 19 Payday Super checks. Core and Payday
+processes for the 46 core checks and 26 Payday Super checks. Core and Payday
 are child modes so Excel's Mashup host cannot carry file-source state from one
 group into the other.
 
@@ -74,6 +75,37 @@ function ConvertTo-MText {
 
     # Quotes are doubled in M string literals; backslashes are literal.
     return '"' + ($Value -replace '"', '""') + '"'
+}
+
+function Write-PaydayScaleFixture {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+        [Parameter(Mandatory = $true)]
+        [int]$RowCount,
+        [Parameter(Mandatory = $true)]
+        [string]$HeaderLine,
+        [Parameter(Mandatory = $true)]
+        [string]$ProvenanceLine
+    )
+
+    $encoding = New-Object System.Text.UTF8Encoding($true)
+    $writer = New-Object System.IO.StreamWriter($Path, $false, $encoding)
+    try {
+        $writer.NewLine = "`r`n"
+        $writer.WriteLine($HeaderLine)
+        for ($row = 1; $row -le $RowCount; $row++) {
+            $writer.WriteLine((
+                '{0},E{0:D6},2026-06-30,quarterly,2026-07-28,ON_TIME,' +
+                '0,fund receipt,100.00,0.00,0.00,0.00,0.00,0.00,0.00,' +
+                'Fabricated scale fixture,Fabricated scale contribution,' -f $row
+            ))
+        }
+        $writer.WriteLine($ProvenanceLine)
+    }
+    finally {
+        $writer.Dispose()
+    }
 }
 
 function Test-SafeTemporaryDirectory {
@@ -276,7 +308,7 @@ if ($CheckSet -eq 'All') {
             if ($payload.SchemaVersion -ne 1 -or $payload.CheckSet -ne $childSet) {
                 throw "$childSet native acceptance result has the wrong schema or check-set identity."
             }
-            $expectedChildCount = if ($childSet -eq 'Core') { 46 } else { 19 }
+            $expectedChildCount = if ($childSet -eq 'Core') { 46 } else { 26 }
             $childRows = @($payload.Rows)
             if ($childRows.Count -ne $expectedChildCount) {
                 throw (
@@ -298,6 +330,24 @@ if ($CheckSet -eq 'All') {
             ) {
                 throw "$childSet native acceptance returned no Excel version/build evidence."
             }
+            if ($childSet -eq 'Payday') {
+                $timingRows = @($payload.Timings)
+                if ($timingRows.Count -ne 3) {
+                    throw "Payday native acceptance returned $($timingRows.Count) scale timings; expected 3."
+                }
+                $expectedScaleRows = @(500, 5000, 10000)
+                foreach ($scaleRows in $expectedScaleRows) {
+                    $matchingTimings = @(
+                        $timingRows | Where-Object { [int]$_.ScaleRows -eq $scaleRows }
+                    )
+                    if (
+                        $matchingTimings.Count -ne 1 -or
+                        [long]$matchingTimings[0].ElapsedMilliseconds -lt 0
+                    ) {
+                        throw "Payday native acceptance returned malformed timing evidence for $scaleRows rows."
+                    }
+                }
+            }
             $childPayloads[$childSet] = $payload
         }
 
@@ -309,13 +359,20 @@ if ($CheckSet -eq 'All') {
         }
         $allRows = @($childPayloads['Core'].Rows) + @($childPayloads['Payday'].Rows)
         $rowCount = $allRows.Count
-        if ($rowCount -ne 65) {
-            throw "Combined native acceptance count was $rowCount; expected exactly 65."
+        if ($rowCount -ne 72) {
+            throw "Combined native acceptance count was $rowCount; expected exactly 72."
         }
         $failedChecks = Write-NativeCheckSummary `
             -Rows $allRows `
             -ExcelVersion ([string]$childPayloads['Core'].ExcelVersion) `
             -ExcelBuild ([string]$childPayloads['Core'].ExcelBuild)
+        foreach ($timing in @($childPayloads['Payday'].Timings) | Sort-Object ScaleRows) {
+            Write-Host (
+                'TIMING  Payday Super: {0} rows materialised in {1} ms' -f
+                    $timing.ScaleRows,
+                    $timing.ElapsedMilliseconds
+            )
+        }
         if ($failedChecks -eq 0) {
             $parentExitCode = 0
         }
@@ -393,6 +450,16 @@ $paydayDuplicateProvenanceFixture = Join-Path $temporaryDirectory 'payday-duplic
 $paydayNonTerminalProvenanceFixture = Join-Path $temporaryDirectory 'payday-non-terminal-provenance.csv'
 $paydayEmptyProvenanceFixture = Join-Path $temporaryDirectory 'payday-empty-provenance.csv'
 $paydayShortRowFixture = Join-Path $temporaryDirectory 'payday-short-row.csv'
+$paydayNoContributionsFixture = Join-Path $temporaryDirectory 'payday-no-contributions.csv'
+$paydayUnterminatedQuoteFixture = Join-Path $temporaryDirectory 'payday-unterminated-quote.csv'
+$paydayUnterminatedExtraQuoteFixture = Join-Path $temporaryDirectory 'payday-unterminated-extra-quote.csv'
+$paydayQuotedMultilineFixture = Join-Path $temporaryDirectory 'payday-quoted-multiline.csv'
+$paydayScaleFixtures = @{}
+foreach ($scaleRows in @(500, 5000, 10000)) {
+    $paydayScaleFixtures[$scaleRows] = Join-Path $temporaryDirectory (
+        'payday-scale-{0}.csv' -f $scaleRows
+    )
+}
 
 $temporaryDirectoryCreated = $false
 $exitCode = 1
@@ -519,6 +586,44 @@ Acme Pty Ltd,INV-001,30/06/2026,1100.00
     $paydayShortRowLines |
         Set-Content -LiteralPath $paydayShortRowFixture -Encoding UTF8
 
+    @($paydayLines[0], $paydayLines[-1]) |
+        Set-Content -LiteralPath $paydayNoContributionsFixture -Encoding UTF8
+
+    $utf8WithBom = New-Object System.Text.UTF8Encoding($true)
+    [IO.File]::WriteAllText(
+        $paydayUnterminatedQuoteFixture,
+        $paydayLines[0] + "`r`n" + '1,"unterminated',
+        $utf8WithBom
+    )
+    $paydayExtraLines = @($paydayLines | ForEach-Object { $_ + ',ignored' })
+    $paydayUnterminatedExtraText = (
+        [string]::Join("`r`n", $paydayExtraLines[0..($paydayExtraLines.Count - 2)]) +
+        "`r`n" + $paydayLines[-1] + ',"unterminated'
+    )
+    [IO.File]::WriteAllText(
+        $paydayUnterminatedExtraQuoteFixture,
+        $paydayUnterminatedExtraText,
+        $utf8WithBom
+    )
+    $paydayMultilineLines = @($paydayLines)
+    $paydayMultilineLines[1] = $paydayMultilineLines[1].Replace(
+        '"Fabricated, ""late"" contribution"',
+        '"Fabricated multiline' + "`r`n" + 'contribution"'
+    )
+    [IO.File]::WriteAllText(
+        $paydayQuotedMultilineFixture,
+        [string]::Join("`r`n", $paydayMultilineLines) + "`r`n",
+        $utf8WithBom
+    )
+
+    foreach ($scaleRows in @(500, 5000, 10000)) {
+        Write-PaydayScaleFixture `
+            -Path $paydayScaleFixtures[$scaleRows] `
+            -RowCount $scaleRows `
+            -HeaderLine $paydayLines[0] `
+            -ProvenanceLine $paydayLines[-1]
+    }
+
     $mCombined = ConvertTo-MText $combinedFixture
     $mColumns = ConvertTo-MText $columnsFixture
     $mPeriodOnly = ConvertTo-MText $periodOnlyFixture
@@ -537,6 +642,13 @@ Acme Pty Ltd,INV-001,30/06/2026,1100.00
     $mPaydayNonTerminalProvenance = ConvertTo-MText $paydayNonTerminalProvenanceFixture
     $mPaydayEmptyProvenance = ConvertTo-MText $paydayEmptyProvenanceFixture
     $mPaydayShortRow = ConvertTo-MText $paydayShortRowFixture
+    $mPaydayNoContributions = ConvertTo-MText $paydayNoContributionsFixture
+    $mPaydayUnterminatedQuote = ConvertTo-MText $paydayUnterminatedQuoteFixture
+    $mPaydayUnterminatedExtraQuote = ConvertTo-MText $paydayUnterminatedExtraQuoteFixture
+    $mPaydayQuotedMultiline = ConvertTo-MText $paydayQuotedMultilineFixture
+    $mPaydayScale500 = ConvertTo-MText $paydayScaleFixtures[500]
+    $mPaydayScale5000 = ConvertTo-MText $paydayScaleFixtures[5000]
+    $mPaydayScale10000 = ConvertTo-MText $paydayScaleFixtures[10000]
 
     $coreChecksM = @"
 let
@@ -673,7 +785,7 @@ in
     # Each Payday query reads one fabricated file only. Combining the file
     # sources in one M expression triggers Excel's privacy/firewall host
     # bug (a spurious missing Source step) even though every predicate passes
-    # independently. Separate query materialisations preserve all 19 checks.
+    # independently. Separate query materialisations preserve all 26 checks.
     $paydayBaseChecksM = @"
 let
     s = (v) => if v = null then "(null)" else Text.From(v),
@@ -831,11 +943,86 @@ in
         [pscustomobject]@{
             Name = 'ZZ_PaydayShortRowCheck'
             ExpectedRows = 1
+            Source = @"
+let
+    attempt = try Table.RowCount(PaydaySuper_Report($mPaydayShortRow)),
+    detail = if attempt[HasError] then Text.From(attempt[Error][Detail]) else "",
+    actual = attempt[HasError]
+        and Text.Contains(detail, "CSV record 3")
+        and Text.Contains(detail, "17 fields"),
+    Result = #table(
+        type table [Check = text, Expected = text, Actual = text, Pass = logical],
+        {{"Payday Super: first short record is identified and raises", "true", Text.From(actual), actual = true}}
+    )
+in
+    Result
+"@
+        },
+        [pscustomobject]@{
+            Name = 'ZZ_PaydayNoContributionsCheck'
+            ExpectedRows = 1
             Source = New-PaydayExpectedErrorCheckM `
-                -Name 'Payday Super: a record missing its trailing field raises' `
-                -MExpression "Table.RowCount(PaydaySuper_Report($mPaydayShortRow))"
+                -Name 'Payday Super: header plus provenance but no contributions raises' `
+                -MExpression "Table.RowCount(PaydaySuper_Report($mPaydayNoContributions))"
+        },
+        [pscustomobject]@{
+            Name = 'ZZ_PaydayUnterminatedQuoteCheck'
+            ExpectedRows = 1
+            Source = New-PaydayExpectedErrorCheckM `
+                -Name 'Payday Super: EOF inside a quoted contract field raises' `
+                -MExpression "Table.RowCount(PaydaySuper_Report($mPaydayUnterminatedQuote))"
+        },
+        [pscustomobject]@{
+            Name = 'ZZ_PaydayUnterminatedExtraQuoteCheck'
+            ExpectedRows = 1
+            Source = New-PaydayExpectedErrorCheckM `
+                -Name 'Payday Super: EOF inside an ignored extra quoted field raises' `
+                -MExpression "Table.RowCount(PaydaySuper_Report($mPaydayUnterminatedExtraQuote))"
+        },
+        [pscustomobject]@{
+            Name = 'ZZ_PaydayQuotedMultilineCheck'
+            ExpectedRows = 1
+            Source = @"
+let
+    adapted = PaydaySuper_Report($mPaydayQuotedMultiline),
+    first = Table.SelectRows(adapted, each [row] = "1"){0},
+    actual = Table.RowCount(adapted) = 2
+        and Text.Contains(first[notes], "Fabricated multiline")
+        and Text.Contains(first[notes], Character.FromNumber(10)),
+    Result = #table(
+        type table [Check = text, Expected = text, Actual = text, Pass = logical],
+        {{"Payday Super: quoted multiline text remains one record", "true", Text.From(actual), actual = true}}
+    )
+in
+    Result
+"@
         }
     )
+
+    $paydayScaleSpecifications = @(
+        [pscustomobject]@{ Name = 'ZZ_PaydayScale500Check'; Rows = 500; MPath = $mPaydayScale500 },
+        [pscustomobject]@{ Name = 'ZZ_PaydayScale5000Check'; Rows = 5000; MPath = $mPaydayScale5000 },
+        [pscustomobject]@{ Name = 'ZZ_PaydayScale10000Check'; Rows = 10000; MPath = $mPaydayScale10000 }
+    )
+    foreach ($scaleSpecification in $paydayScaleSpecifications) {
+        $scaleRows = [int]$scaleSpecification.Rows
+        $scaleMPath = [string]$scaleSpecification.MPath
+        $paydayCheckQueries += [pscustomobject]@{
+            Name = [string]$scaleSpecification.Name
+            ExpectedRows = 1
+            ScaleRows = $scaleRows
+            Source = @"
+let
+    actual = Table.RowCount(PaydaySuper_Report($scaleMPath)),
+    Result = #table(
+        type table [Check = text, Expected = text, Actual = text, Pass = logical],
+        {{"Payday Super: $scaleRows-row report materialises", "$scaleRows", Text.From(actual), actual = $scaleRows}}
+    )
+in
+    Result
+"@
+        }
+    }
 
     try {
         $excel = New-Object -ComObject Excel.Application
@@ -899,6 +1086,7 @@ in
         }
     )
     $checkRows = @()
+    $timings = @()
     for ($queryIndex = 0; $queryIndex -lt $querySpecifications.Count; $queryIndex++) {
         $querySpecification = $querySpecifications[$queryIndex]
         $selectedQueryName = [string]$querySpecification.Name
@@ -927,6 +1115,7 @@ in
         $queryTable.CommandText = @("SELECT * FROM [$selectedQueryName]")
         $queryTable.BackgroundQuery = $false
 
+        $refreshStopwatch = [Diagnostics.Stopwatch]::StartNew()
         try {
             [void]$queryTable.Refresh($false)
             $excel.CalculateUntilAsyncQueriesDone()
@@ -936,6 +1125,17 @@ in
                 "$selectedQueryName Power Query refresh failed. Desktop Excel must provide " +
                 'Microsoft.Mashup.OleDb.1. ' + $_.Exception.Message
             )
+        }
+        finally {
+            $refreshStopwatch.Stop()
+        }
+
+        if ($null -ne $querySpecification.PSObject.Properties['ScaleRows']) {
+            $timings += [pscustomobject]@{
+                Name = $selectedQueryName
+                ScaleRows = [int]$querySpecification.ScaleRows
+                ElapsedMilliseconds = [long]$refreshStopwatch.ElapsedMilliseconds
+            }
         }
 
         $dataBodyRange = $listObject.DataBodyRange
@@ -974,7 +1174,7 @@ in
         Release-ComReference $worksheet 'Worksheet'
         $worksheet = $null
     }
-    $expectedRowCount = if ($CheckSet -eq 'Core') { 46 } else { 19 }
+    $expectedRowCount = if ($CheckSet -eq 'Core') { 46 } else { 26 }
     if ($checkRows.Count -ne $expectedRowCount) {
         throw (
             "$CheckSet child aggregated $($checkRows.Count) rows; " +
@@ -987,6 +1187,7 @@ in
         ExcelVersion = $excelVersion
         ExcelBuild = $excelBuild
         Rows = $checkRows
+        Timings = $timings
     }
     $json = $payload | ConvertTo-Json -Depth 5
     $utf8WithoutBom = New-Object System.Text.UTF8Encoding($false)

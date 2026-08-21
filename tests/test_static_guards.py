@@ -82,8 +82,11 @@ def _parse_payday_super_report(path):
     retain.  It intentionally does not calculate an exposure or alter a
     producer verdict.
     """
-    with path.open(newline="", encoding="utf-8-sig") as stream:
-        rows = list(csv.reader(stream))
+    try:
+        with path.open(newline="", encoding="utf-8-sig") as stream:
+            rows = list(csv.reader(stream, strict=True))
+    except csv.Error as exc:
+        raise PaydaySuperReportError("unterminated quoted field or malformed CSV") from exc
     if not rows:
         raise PaydaySuperReportError("no header row")
 
@@ -128,6 +131,8 @@ def _parse_payday_super_report(path):
 
     if not provenance:
         raise PaydaySuperReportError("no terminal NOTE provenance")
+    if not records:
+        raise PaydaySuperReportError("no contribution rows")
     return records, provenance
 
 
@@ -210,6 +215,13 @@ class NativeExcelAcceptanceSafetyTests(unittest.TestCase):
         self.assertIn("ZZ_PaydayNonTerminalProvenanceCheck", source)
         self.assertIn("ZZ_PaydayEmptyProvenanceCheck", source)
         self.assertIn("ZZ_PaydayShortRowCheck", source)
+        self.assertIn("ZZ_PaydayNoContributionsCheck", source)
+        self.assertIn("ZZ_PaydayUnterminatedQuoteCheck", source)
+        self.assertIn("ZZ_PaydayUnterminatedExtraQuoteCheck", source)
+        self.assertIn("ZZ_PaydayQuotedMultilineCheck", source)
+        self.assertIn("ZZ_PaydayScale500Check", source)
+        self.assertIn("ZZ_PaydayScale5000Check", source)
+        self.assertIn("ZZ_PaydayScale10000Check", source)
         self.assertIn("$paydayCheckQueries", source)
         self.assertIn("ExpectedRows = 7", source)
         self.assertIn("$querySpecifications = @(\n        if ($CheckSet -eq 'Core')", source)
@@ -230,12 +242,18 @@ class NativeExcelAcceptanceSafetyTests(unittest.TestCase):
             "Table.RowCount(PaydaySuper_Report($mPaydayShortRow))",
             source,
         )
+        self.assertIn("attempt[Error][Detail]", source)
+        self.assertIn('Text.Contains(detail, "CSV record 3")', source)
         self.assertIn(
-            "$expectedChildCount = if ($childSet -eq 'Core') { 46 } else { 19 }",
+            "$expectedChildCount = if ($childSet -eq 'Core') { 46 } else { 26 }",
             source,
         )
         self.assertIn("if ($childRows.Count -ne $expectedChildCount)", source)
-        self.assertIn("if ($rowCount -ne 65)", source)
+        self.assertIn("if ($rowCount -ne 72)", source)
+        self.assertIn("foreach ($scaleRows in @(500, 5000, 10000))", source)
+        self.assertIn("[Diagnostics.Stopwatch]::StartNew()", source)
+        self.assertIn("ScaleRows = $scaleRows", source)
+        self.assertIn("$payload.Timings", source)
         self.assertIn("[ValidateSet('All', 'Core', 'Payday')]", source)
         self.assertIn("-CheckSet $childSet", source)
         self.assertIn("-ResultPath $resultFile", source)
@@ -1124,6 +1142,52 @@ class PaydaySuperReportContractTests(unittest.TestCase):
             with self.assertRaisesRegex(PaydaySuperReportError, "no terminal NOTE provenance"):
                 _parse_payday_super_report(no_note)
 
+    def test_zero_contributions_and_unterminated_quotes_refuse(self):
+        with PAYDAY_SUPER_FIXTURE.open(newline="", encoding="utf-8-sig") as stream:
+            source_rows = list(csv.reader(stream))
+        with tempfile.TemporaryDirectory() as temporary_name:
+            temporary = Path(temporary_name)
+
+            no_contributions = temporary / "no-contributions.csv"
+            with no_contributions.open("w", newline="", encoding="utf-8-sig") as stream:
+                csv.writer(stream).writerows([source_rows[0], source_rows[-1]])
+            with self.assertRaisesRegex(PaydaySuperReportError, "no contribution rows"):
+                _parse_payday_super_report(no_contributions)
+
+            unterminated_contract = temporary / "unterminated-contract.csv"
+            unterminated_contract.write_text(
+                ",".join(source_rows[0]) + "\n" + '1,"unterminated',
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(PaydaySuperReportError, "unterminated quoted field"):
+                _parse_payday_super_report(unterminated_contract)
+
+            unterminated_extra = temporary / "unterminated-extra.csv"
+            rows_with_extra = [source_rows[0] + ["future_column"]]
+            rows_with_extra.extend(row + ["ignored"] for row in source_rows[1:-1])
+            with unterminated_extra.open("w", newline="", encoding="utf-8") as stream:
+                csv.writer(stream).writerows(rows_with_extra)
+                stream.write(",".join(source_rows[-1]) + ',"unterminated')
+            with self.assertRaisesRegex(PaydaySuperReportError, "unterminated quoted field"):
+                _parse_payday_super_report(unterminated_extra)
+
+    def test_quoted_multiline_field_remains_one_record(self):
+        with PAYDAY_SUPER_FIXTURE.open(newline="", encoding="utf-8-sig") as stream:
+            source_rows = list(csv.reader(stream, strict=True))
+        changed = [list(row) for row in source_rows]
+        notes = source_rows[0].index("notes")
+        changed[1][notes] = "Fabricated multiline\ncontribution"
+
+        with tempfile.TemporaryDirectory() as temporary_name:
+            report = Path(temporary_name) / "quoted-multiline.csv"
+            with report.open("w", newline="", encoding="utf-8-sig") as stream:
+                csv.writer(stream).writerows(changed)
+            records, provenance = _parse_payday_super_report(report)
+
+        self.assertEqual(len(records), 2)
+        self.assertEqual(records[0]["notes"], "Fabricated multiline\ncontribution")
+        self.assertIn("payday-super-checker", provenance)
+
     def test_power_query_pins_contract_validation_and_metadata_provenance(self):
         source = (ROOT / "powerquery" / "PaydaySuper.Report.pq").read_text(encoding="utf-8")
         self.assertRegex(source, r"(?m)^\s*PaydaySuperReport = \(FilePath as text\) as table =>")
@@ -1142,13 +1206,28 @@ class PaydaySuperReportContractTests(unittest.TestCase):
             r'fileBinary\s*=\s*Binary\.Buffer\(File\.Contents\(FilePath\)\)',
             r'Table\.SelectColumns\(HeadersChecked, RequiredHeaders, MissingField\.Error\)',
             r'Table\.Buffer\(AmountTyped\)',
-            r'CsvRecordWidths',
+            r'CharacterCount\s*=\s*Text\.Length\(CsvText\)',
+            r'Lines\.FromText\(CsvText, QuoteStyle\.Csv, false\)',
+            r'MeasureRecord\s*=\s*\(recordText as text, recordNumber as number\)',
+            r'quoteCount\s*=\s*Text\.Length\(recordText\)',
+            r'Number\.Mod\(quoteCount, 2\) = 0',
+            r'Csv\.Document\(\s*Text\.ToBinary\(quoteChecked, TextEncoding\.Utf8\)',
+            r'FirstMalformedRecord\s*=\s*Table\.FirstN\(',
             r'RecordWidthsChecked',
+            r'Text\.From\(malformed\[RecordNumber\]\)',
             r'IsTerminalNoteCandidate',
-            r'ValidatedResult\s*=\s*if Text\.Length\(ProvenanceChecked\) >= 0 then Result',
+            r'DataRowCount\s*=\s*Table\.RowCount\(DataRows\)',
+            r'Error\.Record\(\s*"PaydaySuper\.Report",\s*"Missing contribution rows"',
+            r'ValidatedResult\s*=\s*if\s*Text\.Length\(ProvenanceChecked\) >= 0 '
+            r'and ContributionRowCount > 0\s*then Result',
         ):
             with self.subTest(required=required):
                 self.assertRegex(source, required)
+        self.assertNotIn("List.Count(CsvCharacters)", source)
+        self.assertNotIn("Widths = {}", source)
+        self.assertNotIn('{"Widths", each _ &', source)
+        self.assertNotIn("ScanCharacterRange", source)
+        self.assertNotIn("CheckRecordWidth", source)
 
     def test_documentation_states_the_contract_and_future_parser_boundary(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
@@ -1162,6 +1241,9 @@ class PaydaySuperReportContractTests(unittest.TestCase):
             "raw `verdict`",
             "literal employee identifier is `NOTE` remains data",
             "present empty trailing field is valid",
+            "report with no contribution rows",
+            "ignored extra producer column",
+            "quoted multiline field",
         ):
             with self.subTest(required=required):
                 self.assertIn(required, readme)
