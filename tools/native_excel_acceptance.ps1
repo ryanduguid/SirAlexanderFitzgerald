@@ -252,7 +252,7 @@ if ($CheckSet -eq 'All') {
     }
 
     $parentTemporaryDirectory = Join-Path $systemTemporaryRoot (
-        'accounting-excel-toolkit-native-' + [guid]::NewGuid().ToString('D')
+        'sir-alexander-fitzgerald-native-' + [guid]::NewGuid().ToString('D')
     )
     $parentTemporaryDirectory = [IO.Path]::GetFullPath($parentTemporaryDirectory)
     if (-not (Test-SafeTemporaryDirectory $parentTemporaryDirectory $systemTemporaryRoot)) {
