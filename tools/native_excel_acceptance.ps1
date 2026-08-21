@@ -80,7 +80,7 @@ function Test-SafeTemporaryDirectory {
         $expectedParent,
         [StringComparison]::OrdinalIgnoreCase
     ) -and $leaf -match (
-        '^accounting-excel-toolkit-native-' +
+        '^sir-alexander-fitzgerald-native-' +
         '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
     )
 }
@@ -138,7 +138,7 @@ if ($powerQueryFiles.Count -eq 0) {
 
 $systemTemporaryRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
 $temporaryDirectory = Join-Path $systemTemporaryRoot (
-    'accounting-excel-toolkit-native-' + [guid]::NewGuid().ToString('D')
+    'sir-alexander-fitzgerald-native-' + [guid]::NewGuid().ToString('D')
 )
 $temporaryDirectory = [IO.Path]::GetFullPath($temporaryDirectory)
 if (-not (Test-SafeTemporaryDirectory $temporaryDirectory $systemTemporaryRoot)) {
