@@ -60,22 +60,25 @@ let
             let
                 quoteCount = Text.Length(recordText) -
                     Text.Length(Text.Replace(recordText, QuoteCharacter, "")),
-                quoteChecked = if Number.Mod(quoteCount, 2) = 0 then recordText else
+                // Keep the parity error outside the parser try. Otherwise M's
+                // lazy evaluation lets that try catch and relabel this specific
+                // EOF contract failure as generic invalid CSV.
+                parsedAttempt = if Number.Mod(quoteCount, 2) <> 0 then
                     error Error.Record(
                         "PaydaySuper.Report",
                         "Malformed report row",
                         "CSV record " & Text.From(recordNumber) &
                             " ends inside an unterminated quoted field."
+                    )
+                    else try Csv.Document(
+                        Text.ToBinary(recordText, TextEncoding.Utf8),
+                        [
+                            Delimiter = ",",
+                            Encoding = 65001,
+                            QuoteStyle = QuoteStyle.Csv,
+                            ExtraValues = ExtraValues.Error
+                        ]
                     ),
-                parsedAttempt = try Csv.Document(
-                    Text.ToBinary(quoteChecked, TextEncoding.Utf8),
-                    [
-                        Delimiter = ",",
-                        Encoding = 65001,
-                        QuoteStyle = QuoteStyle.Csv,
-                        ExtraValues = ExtraValues.Error
-                    ]
-                ),
                 parsed = if parsedAttempt[HasError] then
                     error Error.Record(
                         "PaydaySuper.Report",

@@ -263,6 +263,37 @@ class NativeExcelAcceptanceSafetyTests(unittest.TestCase):
         self.assertIn("Core and Payday children ran against different Excel", source)
         self.assertNotIn("WScript.Shell", source)
 
+    def test_native_unterminated_quote_checks_pin_the_adapter_error(self):
+        source = self.source()
+
+        self.assertEqual(
+            source.count("Source = New-PaydayMalformedRowErrorCheckM"),
+            2,
+        )
+        self.assertEqual(
+            source.count("-DetailContains 'unterminated quoted field'"),
+            2,
+        )
+        self.assertIn("$mExpected = ConvertTo-MText (", source)
+        self.assertIn(
+            "{{$mName, $mExpected, actualText, actual = true}}",
+            source,
+        )
+        self.assertNotIn(
+            '"PaydaySuper.Report / Malformed report row / $mDetailContains"',
+            source,
+        )
+        for required in (
+            'Record.FieldOrDefault(errorRecord, "Reason", "")',
+            'Record.FieldOrDefault(errorRecord, "Message", "")',
+            'Record.FieldOrDefault(errorRecord, "Detail", "")',
+            'and reason = "PaydaySuper.Report"',
+            'and message = "Malformed report row"',
+            "and Text.Contains(detail, $mDetailContains)",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, source)
+
     @unittest.skipUnless(
         sys.platform == "win32" and shutil.which("powershell.exe"),
         "requires Windows PowerShell 5.1",
@@ -1210,8 +1241,8 @@ class PaydaySuperReportContractTests(unittest.TestCase):
             r'Lines\.FromText\(CsvText, QuoteStyle\.Csv, false\)',
             r'MeasureRecord\s*=\s*\(recordText as text, recordNumber as number\)',
             r'quoteCount\s*=\s*Text\.Length\(recordText\)',
-            r'Number\.Mod\(quoteCount, 2\) = 0',
-            r'Csv\.Document\(\s*Text\.ToBinary\(quoteChecked, TextEncoding\.Utf8\)',
+            r'parsedAttempt\s*=\s*if Number\.Mod\(quoteCount, 2\) <> 0 then',
+            r'else try Csv\.Document\(\s*Text\.ToBinary\(recordText, TextEncoding\.Utf8\)',
             r'FirstMalformedRecord\s*=\s*Table\.FirstN\(',
             r'RecordWidthsChecked',
             r'Text\.From\(malformed\[RecordNumber\]\)',
@@ -1228,6 +1259,7 @@ class PaydaySuperReportContractTests(unittest.TestCase):
         self.assertNotIn('{"Widths", each _ &', source)
         self.assertNotIn("ScanCharacterRange", source)
         self.assertNotIn("CheckRecordWidth", source)
+        self.assertNotIn("quoteChecked =", source)
 
     def test_documentation_states_the_contract_and_future_parser_boundary(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")

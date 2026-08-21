@@ -856,6 +856,44 @@ in
 "@
     }
 
+    function New-PaydayMalformedRowErrorCheckM {
+        param(
+            [Parameter(Mandatory = $true)]
+            [string]$Name,
+            [Parameter(Mandatory = $true)]
+            [string]$MExpression,
+            [Parameter(Mandatory = $true)]
+            [string]$DetailContains
+        )
+
+        $mName = ConvertTo-MText $Name
+        $mDetailContains = ConvertTo-MText $DetailContains
+        $mExpected = ConvertTo-MText (
+            'PaydaySuper.Report / Malformed report row / ' + $DetailContains
+        )
+        return @"
+let
+    attempt = try $MExpression,
+    errorRecord = if attempt[HasError] then attempt[Error] else [],
+    reason = Text.From(Record.FieldOrDefault(errorRecord, "Reason", "")),
+    message = Text.From(Record.FieldOrDefault(errorRecord, "Message", "")),
+    detail = Text.From(Record.FieldOrDefault(errorRecord, "Detail", "")),
+    actual = attempt[HasError]
+        and reason = "PaydaySuper.Report"
+        and message = "Malformed report row"
+        and Text.Contains(detail, $mDetailContains),
+    actualText = if attempt[HasError]
+        then reason & " / " & message & " / " & detail
+        else "no error",
+    Result = #table(
+        type table [Check = text, Expected = text, Actual = text, Pass = logical],
+        {{$mName, $mExpected, actualText, actual = true}}
+    )
+in
+    Result
+"@
+    }
+
     $paydayCheckQueries = @(
         [pscustomobject]@{ Name = 'ZZ_PaydayBaseChecks'; ExpectedRows = 7; Source = $paydayBaseChecksM },
         [pscustomobject]@{ Name = 'ZZ_PaydayExtraCheck'; ExpectedRows = 1; Source = $paydayExtraCheckM },
@@ -968,16 +1006,18 @@ in
         [pscustomobject]@{
             Name = 'ZZ_PaydayUnterminatedQuoteCheck'
             ExpectedRows = 1
-            Source = New-PaydayExpectedErrorCheckM `
+            Source = New-PaydayMalformedRowErrorCheckM `
                 -Name 'Payday Super: EOF inside a quoted contract field raises' `
-                -MExpression "Table.RowCount(PaydaySuper_Report($mPaydayUnterminatedQuote))"
+                -MExpression "Table.RowCount(PaydaySuper_Report($mPaydayUnterminatedQuote))" `
+                -DetailContains 'unterminated quoted field'
         },
         [pscustomobject]@{
             Name = 'ZZ_PaydayUnterminatedExtraQuoteCheck'
             ExpectedRows = 1
-            Source = New-PaydayExpectedErrorCheckM `
+            Source = New-PaydayMalformedRowErrorCheckM `
                 -Name 'Payday Super: EOF inside an ignored extra quoted field raises' `
-                -MExpression "Table.RowCount(PaydaySuper_Report($mPaydayUnterminatedExtraQuote))"
+                -MExpression "Table.RowCount(PaydaySuper_Report($mPaydayUnterminatedExtraQuote))" `
+                -DetailContains 'unterminated quoted field'
         },
         [pscustomobject]@{
             Name = 'ZZ_PaydayQuotedMultilineCheck'
