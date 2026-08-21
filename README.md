@@ -70,9 +70,9 @@ Aged receivables/payables parser, MYOB export parsers, Office Scripts ports of t
 
 ## Related
 
-[`australian-accounting-skills`](https://github.com/ryanduguid/australian-accounting-skills): Claude Code skills for AU public-practice workflows; its `xero-exports` skill pairs with these parsers.
+[`australian-accounting-skills`](https://github.com/ryanduguid/MaryAddisonHamilton): Claude Code skills for AU public-practice workflows; its `xero-exports` skill pairs with these parsers.
 
-[`xero-trial-balance-export`](https://github.com/ryanduguid/xero-trial-balance-export): the API path for the same trial balance; use it when OAuth app access is on the table and skip the CSV cleanup entirely.
+[`xero-trial-balance-export`](https://github.com/ryanduguid/JohnSpenceOgilvy): the API path for the same trial balance; use it when OAuth app access is on the table and skip the CSV cleanup entirely.
 
 ## Disclaimer
 

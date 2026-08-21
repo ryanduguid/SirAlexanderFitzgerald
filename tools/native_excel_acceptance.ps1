@@ -16,14 +16,14 @@ only. Generated fixtures and the workbook live in a GUID-named directory under
 the operating system's temporary directory and are removed in finally.
 
 .PARAMETER RepositoryRoot
-Path to the accounting-excel-toolkit checkout to test. By default this is the
+Path to the repository checkout to test. By default this is the
 repository containing this script.
 
 .EXAMPLE
 powershell -NoProfile -File .\tools\native_excel_acceptance.ps1
 
 .EXAMPLE
-powershell -NoProfile -File .\tools\native_excel_acceptance.ps1 -RepositoryRoot C:\src\accounting-excel-toolkit
+powershell -NoProfile -File .\tools\native_excel_acceptance.ps1 -RepositoryRoot C:\src\SirAlexanderFitzgerald
 #>
 [CmdletBinding()]
 param(
