@@ -37,10 +37,10 @@ powershell -NoProfile -File tools/native_excel_acceptance.ps1
 
 Use `-RepositoryRoot D:\src\SirAlexanderFitzgerald` to test a different
 checkout. The runner requires Excel's Power Query engine and the
-`Microsoft.Mashup.OleDb.1` provider. It exercises exactly 46 real-engine cases:
-both fabricated Xero layouts, period and YTD selection, malformed exports,
-lazy evaluation, AU financial-year boundaries, ABN validation and header
-promotion.
+`Microsoft.Mashup.OleDb.1` provider. It exercises exactly 58 real-engine cases:
+both fabricated Xero layouts, the fabricated Payday Super producer contract,
+period and YTD selection, malformed exports, lazy evaluation, AU financial-year
+boundaries, ABN validation and header promotion.
 
 The runner does not write to repository sources or samples. It creates its
 workbook and adverse fixtures in a GUID-named system temporary directory,

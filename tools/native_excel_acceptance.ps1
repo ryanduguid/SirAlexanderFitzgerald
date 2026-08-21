@@ -4,7 +4,7 @@
 Runs the repository's Power Query acceptance checks in desktop Excel.
 
 .DESCRIPTION
-Loads every checked-in .pq file into a disposable workbook and evaluates 46
+Loads every checked-in .pq file into a disposable workbook and evaluates 58
 checks in Excel's real Power Query engine. The checks cover both fabricated
 Xero trial-balance layouts, financial-year boundaries, ABN validation, header
 promotion, and adverse and lazy-evaluation branches.
@@ -121,8 +121,14 @@ if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
 $powerQueryDirectory = Join-Path $repository 'powerquery'
 $combinedFixture = Join-Path $repository 'samples\sample-xero-trial-balance.csv'
 $columnsFixture = Join-Path $repository 'samples\sample-xero-trial-balance-columns.csv'
+$paydaySuperFixture = Join-Path $repository 'samples\sample-payday-super-report.csv'
 
-foreach ($requiredPath in @($powerQueryDirectory, $combinedFixture, $columnsFixture)) {
+foreach ($requiredPath in @(
+    $powerQueryDirectory,
+    $combinedFixture,
+    $columnsFixture,
+    $paydaySuperFixture
+)) {
     if (-not (Test-Path -LiteralPath $requiredPath)) {
         throw "Required repository path is missing: $requiredPath"
     }
@@ -150,6 +156,12 @@ $periodOnlyFixture = Join-Path $temporaryDirectory 'period-only.csv'
 $notTrialBalanceFixture = Join-Path $temporaryDirectory 'not-a-tb.csv'
 $decoyEntityFixture = Join-Path $temporaryDirectory 'decoy-entity.csv'
 $badAmountFixture = Join-Path $temporaryDirectory 'bad-amount.csv'
+$paydayExtraFixture = Join-Path $temporaryDirectory 'payday-extra-column.csv'
+$paydayMissingHeaderFixture = Join-Path $temporaryDirectory 'payday-missing-header.csv'
+$paydayDuplicateHeaderFixture = Join-Path $temporaryDirectory 'payday-duplicate-header.csv'
+$paydayMalformedFixture = Join-Path $temporaryDirectory 'payday-malformed.csv'
+$paydayBadAmountFixture = Join-Path $temporaryDirectory 'payday-bad-amount.csv'
+$paydayNoProvenanceFixture = Join-Path $temporaryDirectory 'payday-no-provenance.csv'
 
 $temporaryDirectoryCreated = $false
 $exitCode = 1
@@ -214,12 +226,52 @@ Acme Pty Ltd,INV-001,30/06/2026,1100.00
     $badAmountContents |
         Set-Content -LiteralPath $badAmountFixture -Encoding UTF8
 
+    # Payday Super report variants exercise the named producer contract. They
+    # derive solely from the fabricated checked-in fixture and stay under the
+    # GUID-named temporary directory.
+    $paydayLines = @(Get-Content -LiteralPath $paydaySuperFixture -Encoding UTF8)
+    ($paydayLines | ForEach-Object { $_ + ',ignored' }) |
+        Set-Content -LiteralPath $paydayExtraFixture -Encoding UTF8
+
+    $paydayMissingHeaderLines = @($paydayLines)
+    $paydayMissingHeaderLines[0] = $paydayMissingHeaderLines[0] -replace 'verdict', 'decision'
+    $paydayMissingHeaderLines |
+        Set-Content -LiteralPath $paydayMissingHeaderFixture -Encoding UTF8
+
+    $paydayDuplicateHeaderLines = @($paydayLines)
+    $paydayDuplicateHeaderLines[0] += ',verdict'
+    for ($index = 1; $index -lt $paydayDuplicateHeaderLines.Count; $index++) {
+        $paydayDuplicateHeaderLines[$index] += ',ignored'
+    }
+    $paydayDuplicateHeaderLines |
+        Set-Content -LiteralPath $paydayDuplicateHeaderFixture -Encoding UTF8
+
+    $paydayMalformedLines = @($paydayLines)
+    $paydayMalformedLines[1] = $paydayMalformedLines[1] -replace ',000123,', ',,'
+    $paydayMalformedLines |
+        Set-Content -LiteralPath $paydayMalformedFixture -Encoding UTF8
+
+    $paydayBadAmountLines = @($paydayLines)
+    $paydayBadAmountLines[1] = $paydayBadAmountLines[1] -replace '780\.00', 'TBC'
+    $paydayBadAmountLines |
+        Set-Content -LiteralPath $paydayBadAmountFixture -Encoding UTF8
+
+    $paydayLines[0..($paydayLines.Count - 2)] |
+        Set-Content -LiteralPath $paydayNoProvenanceFixture -Encoding UTF8
+
     $mCombined = ConvertTo-MText $combinedFixture
     $mColumns = ConvertTo-MText $columnsFixture
     $mPeriodOnly = ConvertTo-MText $periodOnlyFixture
     $mNotTrialBalance = ConvertTo-MText $notTrialBalanceFixture
     $mDecoyEntity = ConvertTo-MText $decoyEntityFixture
     $mBadAmount = ConvertTo-MText $badAmountFixture
+    $mPayday = ConvertTo-MText $paydaySuperFixture
+    $mPaydayExtra = ConvertTo-MText $paydayExtraFixture
+    $mPaydayMissingHeader = ConvertTo-MText $paydayMissingHeaderFixture
+    $mPaydayDuplicateHeader = ConvertTo-MText $paydayDuplicateHeaderFixture
+    $mPaydayMalformed = ConvertTo-MText $paydayMalformedFixture
+    $mPaydayBadAmount = ConvertTo-MText $paydayBadAmountFixture
+    $mPaydayNoProvenance = ConvertTo-MText $paydayNoProvenanceFixture
 
     $checksM = @"
 let
@@ -229,6 +281,10 @@ let
     chk = (name, expected, actual) =>
         [Check = name, Expected = s(expected), Actual = s(actual), Pass = (s(expected) = s(actual))],
     raises = (f) => (try f())[HasError],
+
+    // --- PaydaySuper_Report: fixed producer contract ------------------
+    ps = PaydaySuper_Report($mPayday),
+    psFormula = Table.SelectRows(ps, each [employee_id] = "'=FORMULA"),
 
     // --- Xero_TrialBalance: both layouts -------------------------------
     tbC    = Xero_TrialBalance($mCombined),
@@ -279,6 +335,36 @@ let
         chk("columns: 12 data rows", 12, Table.RowCount(tbX)),
         chk("parity: combined and columns layouts agree on all 12 rows", true,
             rowText(projC) = rowText(projX)),
+
+        // --- PaydaySuper_Report ----------------------------------------
+        chk("Payday Super: terminal NOTE is excluded from two data rows", 2, Table.RowCount(ps)),
+        chk("Payday Super: leading-zero and escaped formula IDs stay text", true,
+            Table.FirstValue(Table.SelectColumns(ps, {"employee_id"})) = "000123"
+                and Value.Is(Table.FirstValue(Table.SelectColumns(ps, {"employee_id"})), type text)
+                and Table.RowCount(psFormula) = 1),
+        chk("Payday Super: raw verdict, caveat and unassessable range survive", true,
+            Table.FirstValue(Table.SelectColumns(psFormula, {"verdict"})) = "UNKNOWN"
+                and Text.Contains(Table.FirstValue(Table.SelectColumns(psFormula, {"caveats"})), "calendar coverage")
+                and Table.FirstValue(Table.SelectColumns(psFormula, {"unassessable_between"})) = "LATE or ON_TIME"),
+        chk("Payday Super: producer amounts are numbers, not recalculated", true,
+            Value.Is(Table.FirstValue(Table.SelectColumns(ps, {"sg_amount"})), type number)
+                and near(Table.FirstValue(Table.SelectColumns(ps, {"sg_amount"})), 780.00)),
+        chk("Payday Super: blank producer amount stays null", "(null)",
+            Table.FirstValue(Table.SelectColumns(psFormula, {"final_shortfall"}))),
+        chk("Payday Super: terminal NOTE provenance is table metadata", true,
+            Text.Contains(Value.Metadata(ps)[PaydaySuperProvenance], "payday-super-checker")),
+        chk("Payday Super: extra producer columns are tolerated", 2,
+            Table.RowCount(PaydaySuper_Report($mPaydayExtra))),
+        chk("Payday Super: renamed or missing required header raises", true,
+            raises(() => Table.RowCount(PaydaySuper_Report($mPaydayMissingHeader)))),
+        chk("Payday Super: duplicate header raises", true,
+            raises(() => Table.RowCount(PaydaySuper_Report($mPaydayDuplicateHeader)))),
+        chk("Payday Super: malformed contribution row raises", true,
+            raises(() => Table.RowCount(PaydaySuper_Report($mPaydayMalformed)))),
+        chk("Payday Super: invalid producer amount raises", true,
+            raises(() => Table.RowCount(PaydaySuper_Report($mPaydayBadAmount)))),
+        chk("Payday Super: no terminal NOTE provenance raises", true,
+            raises(() => Table.RowCount(PaydaySuper_Report($mPaydayNoProvenance))),
 
         // --- Fx_AUFinancialYear ----------------------------------------
         chk("FY: 30 Jun 2026 -> FY2026", "FY2026", Fx_AUFinancialYear(#date(2026, 6, 30))[Label]),
@@ -437,8 +523,8 @@ in
     $rowCount = $rowUpper - $rowLower + 1
     $columnCount = $columnUpper - $columnLower + 1
 
-    if ($rowCount -ne 46) {
-        throw "ZZ_Checks returned $rowCount rows; expected exactly 46."
+    if ($rowCount -ne 58) {
+        throw "ZZ_Checks returned $rowCount rows; expected exactly 58."
     }
     if ($columnCount -ne 4) {
         throw "ZZ_Checks returned $columnCount columns; expected exactly 4."
